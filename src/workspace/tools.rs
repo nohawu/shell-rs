@@ -47,6 +47,16 @@ use super::{
 pub(super) const TOOL_SIDEBAR_WIDTH: Pixels = px(320.);
 
 impl Workspace {
+    pub(super) fn on_kubernetes_action(
+        &mut self,
+        action: &crate::app::KubernetesAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tools.update(cx, |tools, cx| {
+            tools.kubernetes_command(&action.0, window, cx)
+        });
+    }
     /// The SSH terminal the right sidebar works on: the one in front last
     /// while it is on screen, else another that is.
     pub(super) fn tool_terminal(&self, cx: &App) -> Option<ToolTerminal> {

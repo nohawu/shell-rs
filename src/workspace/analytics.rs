@@ -118,6 +118,7 @@ impl Workspace {
             ToolKind::Snippets => Counter::ToolSnippets,
             ToolKind::History => Counter::ToolHistory,
             ToolKind::Docker => Counter::ToolDocker,
+            ToolKind::Kubernetes => Counter::ToolKubernetes,
             ToolKind::Services => Counter::ToolServices,
             ToolKind::Processes => Counter::ToolProcesses,
             ToolKind::Connections => Counter::ToolNetstat,

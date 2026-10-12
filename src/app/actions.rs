@@ -11,6 +11,7 @@ use crate::{
     host::{
         CredentialId, ForwardId, GroupId, HostId, HostNode, NodeDrop, SnippetCategoryId, SnippetId,
     },
+    kubernetes::KubernetesCommand,
     monitor::MonitorDetail,
     processes::ProcessSort,
     services::ServiceCommand,
@@ -243,6 +244,8 @@ id_actions! {
     /// Show a tool in the right sidebar, or hide the sidebar if it is
     /// already showing that tool.
     ToggleTool(ToolKind);
+    /// Browse Kubernetes resources and logs on the SSH host.
+    KubernetesAction(KubernetesCommand);
     /// Unfold a part of the system monitor, or fold it away again.
     ToggleMonitorDetail(MonitorDetail);
     /// Sort the process list by memory or CPU, the most first; by the same
@@ -380,6 +383,7 @@ pub enum ToolKind {
     Snippets,
     History,
     Docker,
+    Kubernetes,
     Services,
     Processes,
     Connections,
@@ -387,10 +391,11 @@ pub enum ToolKind {
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 7] = [
+    pub const ALL: [ToolKind; 8] = [
         ToolKind::Snippets,
         ToolKind::History,
         ToolKind::Docker,
+        ToolKind::Kubernetes,
         ToolKind::Services,
         ToolKind::Processes,
         ToolKind::Connections,

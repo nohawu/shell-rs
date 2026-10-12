@@ -12,6 +12,7 @@ use crate::docker::{Container, DockerObject, DockerPanel, ObjectSummary};
 use crate::history::HistoryPanel;
 use crate::host::{HostId, HostOs, HostStore, SnippetCategoryId};
 use crate::i18n::t;
+use crate::kubernetes::{KubernetesCommand, KubernetesPanel};
 use crate::monitor::{MonitorDetail, MonitorPanel};
 use crate::netstat::NetstatPanel;
 use crate::processes::{Process, ProcessDetails, ProcessPanel, ProcessSort};
@@ -25,6 +26,7 @@ impl ToolKind {
             ToolKind::Snippets => t!("tools.kind.snippets"),
             ToolKind::History => t!("tools.kind.history"),
             ToolKind::Docker => "Docker".into(),
+            ToolKind::Kubernetes => "Kubernetes".into(),
             ToolKind::Services => t!("tools.kind.services"),
             ToolKind::Processes => t!("tools.kind.processes"),
             ToolKind::Connections => t!("tools.kind.connections"),
@@ -39,6 +41,7 @@ impl ToolKind {
             ToolKind::Snippets => CatalogIcon::CodeXml,
             ToolKind::History => CatalogIcon::RotateCcwClock,
             ToolKind::Docker => return Icon::default().path(DOCKER_ICON),
+            ToolKind::Kubernetes => CatalogIcon::Boxes,
             ToolKind::Services => CatalogIcon::ServerCog,
             ToolKind::Processes => CatalogIcon::ListFilter,
             ToolKind::Connections => CatalogIcon::Network,
@@ -64,7 +67,9 @@ impl ToolKind {
             ToolKind::Snippets => true,
             // Wherever `sh` runs `docker`: Linux, and a Mac with Docker
             // Desktop; and bash's history file wherever `sh` reads it.
-            ToolKind::Docker | ToolKind::History => os != Some(HostOs::Windows),
+            ToolKind::Docker | ToolKind::History | ToolKind::Kubernetes => {
+                os != Some(HostOs::Windows)
+            }
         }
     }
 
@@ -74,6 +79,7 @@ impl ToolKind {
             ToolKind::Snippets => "tool-snippets",
             ToolKind::History => "tool-history",
             ToolKind::Docker => "tool-docker",
+            ToolKind::Kubernetes => "tool-kubernetes",
             ToolKind::Services => "tool-services",
             ToolKind::Processes => "tool-processes",
             ToolKind::Connections => "tool-connections",
@@ -116,6 +122,7 @@ pub struct ToolSidebar {
     snippets: Entity<SnippetPanel>,
     history: Entity<HistoryPanel>,
     docker: Entity<DockerPanel>,
+    kubernetes: Entity<KubernetesPanel>,
     services: Entity<ServicePanel>,
     processes: Entity<ProcessPanel>,
     netstat: Entity<NetstatPanel>,
@@ -140,6 +147,7 @@ impl ToolSidebar {
             snippets: cx.new(|cx| SnippetPanel::new(store, dispatch.clone(), window, cx)),
             history: cx.new(|cx| HistoryPanel::new(dispatch.clone(), window, cx)),
             docker: cx.new(|_| DockerPanel::new(dispatch.clone())),
+            kubernetes: cx.new(|cx| KubernetesPanel::new(dispatch.clone(), window, cx)),
             services: cx.new(|cx| ServicePanel::new(dispatch.clone(), window, cx)),
             processes: cx.new(|cx| ProcessPanel::new(dispatch.clone(), window, cx)),
             netstat: cx.new(|cx| NetstatPanel::new(dispatch, window, cx)),
@@ -149,6 +157,16 @@ impl ToolSidebar {
 
     pub fn tool(&self) -> ToolKind {
         self.tool
+    }
+
+    pub fn kubernetes_command(
+        &mut self,
+        command: &KubernetesCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.kubernetes
+            .update(cx, |panel, cx| panel.command(command, window, cx));
     }
 
     /// Work on the SSH terminal now in front, and say whether the dock is
@@ -265,6 +283,10 @@ impl ToolSidebar {
             view: terminal.view.clone(),
         });
         let showing = |tool| self.shown && self.tool == tool;
+        let kubernetes = showing(ToolKind::Kubernetes);
+        self.kubernetes.update(cx, |panel, cx| {
+            panel.set_target(target.clone(), kubernetes, cx)
+        });
         let (monitor, netstat, processes, services, docker, history) = (
             showing(ToolKind::Monitor),
             showing(ToolKind::Connections),
@@ -390,6 +412,7 @@ impl Render for ToolSidebar {
                     ToolKind::Snippets => self.snippets.clone().into_any_element(),
                     ToolKind::History => self.history.clone().into_any_element(),
                     ToolKind::Docker => self.docker.clone().into_any_element(),
+                    ToolKind::Kubernetes => self.kubernetes.clone().into_any_element(),
                     ToolKind::Services => self.services.clone().into_any_element(),
                     ToolKind::Processes => self.processes.clone().into_any_element(),
                     ToolKind::Connections => self.netstat.clone().into_any_element(),

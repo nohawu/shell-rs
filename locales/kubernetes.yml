@@ -1,0 +1,122 @@
+_version: 2
+
+k8s.context:
+  zh-CN: 集群（context）
+  en: Cluster (context)
+k8s.namespace:
+  zh-CN: 命名空间
+  en: Namespace
+k8s.all:
+  zh-CN: 全部命名空间
+  en: All namespaces
+k8s.kind:
+  zh-CN: 资源类型
+  en: Resource type
+k8s.search:
+  zh-CN: 搜索名称、状态、标签
+  en: Search names, status, labels
+k8s.count:
+  zh-CN: "%{count} 项资源 · %{namespaces} 个命名空间"
+  en: "Resources: %{count} · Namespaces: %{namespaces}"
+k8s.empty:
+  zh-CN: 当前范围内没有符合条件的资源，可切换命名空间或资源类型。
+  en: No matching resources in this scope. Try another namespace or resource type.
+k8s.failed:
+  zh-CN: "查询失败：%{error}。确认主机已安装 kubectl、已配置 kubeconfig 且有查询权限后重试。"
+  en: "Query failed: %{error}. Check kubectl, kubeconfig and access permissions on the host, then retry."
+k8s.incomplete:
+  zh-CN: 返回数据不完整或超过 SSH 查询的 1 MB 上限，请缩小查询范围后重试。
+  en: The response is incomplete or exceeds the SSH query limit of 1 MB. Narrow the scope and retry.
+k8s.no_context:
+  zh-CN: 主机没有可用的当前 context，请先配置 kubeconfig。
+  en: No current context is available on the host. Configure kubeconfig first.
+k8s.open_details:
+  zh-CN: 查看详情…
+  en: View details…
+k8s.details:
+  zh-CN: 详情
+  en: Details
+k8s.logs:
+  zh-CN: 日志
+  en: Logs
+k8s.commands:
+  zh-CN: 生成命令
+  en: Commands
+k8s.json:
+  zh-CN: 资源详情（JSON，只读）
+  en: Resource details (JSON, read-only)
+k8s.related_pods:
+  zh-CN: 关联 Pod（点击查看容器和日志）
+  en: Related pods (open for containers and logs)
+k8s.choose_pod:
+  zh-CN: 请选择关联 Pod，再选择容器查看日志。
+  en: Open a related pod, then select a container to view logs.
+k8s.container:
+  zh-CN: 容器
+  en: Container
+k8s.tail:
+  zh-CN: 最近行数
+  en: Tail lines
+k8s.since:
+  zh-CN: 时间范围
+  en: Since
+k8s.previous:
+  zh-CN: 上一次容器
+  en: Previous container
+k8s.read_logs:
+  zh-CN: 查询日志
+  en: Read logs
+k8s.log_search:
+  zh-CN: 检索已读取的日志（区分大小写）
+  en: Search retrieved logs (case-sensitive)
+k8s.regex:
+  zh-CN: 正则表达式
+  en: Regex
+k8s.log_count:
+  zh-CN: "匹配 %{count} / %{total} 行"
+  en: "%{count} / %{total} lines match"
+k8s.log_limit:
+  zh-CN: 仅检索所选时间范围和行数内读取的日志，每次最多 512 KB。实时跟踪可在“生成命令”中复制命令。
+  en: Search covers the retrieved time range and tail, up to 512 KB per request. Copy the follow command from Commands for live logs.
+k8s.command_note:
+  zh-CN: 命令绑定当前 SSH 主机上的 context、命名空间和资源。复制后可粘贴到终端执行。
+  en: Commands target this context, namespace and resource on the SSH host. Copy and paste into the terminal to run.
+k8s.command.describe:
+  zh-CN: 查询状态与事件
+  en: Describe status and events
+k8s.command.yaml:
+  zh-CN: 查询 YAML
+  en: Get YAML
+k8s.command.logs:
+  zh-CN: 查询容器日志
+  en: Get container logs
+k8s.command.follow:
+  zh-CN: 实时跟踪日志
+  en: Follow logs
+k8s.command.exec:
+  zh-CN: 进入容器（/bin/sh）
+  en: Enter container (/bin/sh)
+k8s.summary:
+  zh-CN: 状态与配置
+  en: Status and configuration
+k8s.created:
+  zh-CN: 创建时间
+  en: Created
+k8s.labels:
+  zh-CN: 标签
+  en: Labels
+k8s.images:
+  zh-CN: 容器与镜像
+  en: Containers and images
+k8s.no_pods:
+  zh-CN: 当前选择器没有匹配的 Pod。
+  en: No pods match this selector.
+k8s.no_selector:
+  zh-CN: 此资源没有直接的 Pod 选择器，可在 Pod 列表中按名称或标签筛选。
+  en: This resource has no direct pod selector. Filter the Pod list by name or label.
+k8s.no_logs:
+  zh-CN: 所选范围内没有日志。
+  en: No logs in this range.
+k8s.no_log_matches:
+  zh-CN: 没有符合检索条件的日志。
+  en: No matching log lines.

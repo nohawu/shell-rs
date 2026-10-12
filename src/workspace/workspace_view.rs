@@ -2626,6 +2626,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_delete_snippet_category))
             .on_action(cx.listener(Self::on_toggle_snippet_category))
             .on_action(cx.listener(Self::on_refresh_docker))
+            .on_action(cx.listener(Self::on_kubernetes_action))
             .on_action(cx.listener(Self::on_toggle_docker_project))
             .on_action(cx.listener(Self::on_show_docker_object))
             .on_action(cx.listener(Self::on_control_containers))

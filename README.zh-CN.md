@@ -52,6 +52,7 @@ ShellRS 把 Xshell 式的主机管理和多标签终端、WinSCP 式的双栏 SF
 - 系统监控：系统信息、CPU（含每个核）、内存、网卡速率和磁盘占用，每 2 秒刷新。
 - 网络连接、进程管理和系统服务：搜索和筛选，查看进程详情、结束进程，启动、停止、重启 systemd 服务，开关开机启动，查看日志。这三项和系统监控只支持 Linux。
 - Docker：按 compose 项目列出容器，启停、重启、看详情和日志，管理卷、镜像和网络。不是 root 时用免密码的 sudo（系统服务也是）。
+- Kubernetes：选择主机 kubeconfig 中的集群，读取所有命名空间并过滤 Pod、Deployment、StatefulSet、Service 等资源；查看详情与关联 Pod、检索容器日志、生成日志和进入容器等命令。详见[使用说明](docs/kubernetes.md)。
 - 历史命令读主机上的 `~/.bash_history`，命令片段所有主机共用、可以分类；点一下输入到终端，或直接执行。
 
 **SFTP**

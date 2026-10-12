@@ -56,6 +56,7 @@ icon_assets!(
         Keyboard,
         RotateCcw,
         Network,
+        Boxes,
         RadioTower,
         ArrowDownLeft,
         ArrowUpRight,

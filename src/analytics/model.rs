@@ -67,6 +67,7 @@ pub enum Counter {
     ToolSnippets,
     ToolHistory,
     ToolDocker,
+    ToolKubernetes,
     ToolServices,
     ToolProcesses,
     ToolNetstat,
@@ -96,7 +97,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 44] = [
+    pub const ALL: [Counter; 45] = [
         Self::Ssh,
         Self::SshJump,
         Self::SshProxy,
@@ -120,6 +121,7 @@ impl Counter {
         Self::ToolSnippets,
         Self::ToolHistory,
         Self::ToolDocker,
+        Self::ToolKubernetes,
         Self::ToolServices,
         Self::ToolProcesses,
         Self::ToolNetstat,
@@ -168,6 +170,7 @@ impl Counter {
             Self::ToolSnippets => "tool_snippets",
             Self::ToolHistory => "tool_history",
             Self::ToolDocker => "tool_docker",
+            Self::ToolKubernetes => "tool_kubernetes",
             Self::ToolServices => "tool_services",
             Self::ToolProcesses => "tool_processes",
             Self::ToolNetstat => "tool_netstat",
