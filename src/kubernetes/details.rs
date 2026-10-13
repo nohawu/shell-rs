@@ -1,11 +1,12 @@
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IndexPath, Sizable as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
-    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    input::{Editor, EditorState, Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
     select::{Select, SelectEvent, SelectState},
     tab::{Tab, TabBar},
@@ -14,14 +15,18 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::Value;
+use unicode_width::UnicodeWidthStr as _;
 
 use super::{
     commands::{self, LogOptions},
+    logs::{self, LogLine, Token},
     model::{self, KubernetesCommand, Resource, ResourceKind},
     panel::{defer_dispatch, request},
+    presentation::{copy_button, reading, tone_color},
 };
 use crate::app::{CopyCommand, KubernetesAction};
 use crate::i18n::{UiLocale, t};
+use crate::shared::soft_tag;
 use crate::terminal::ExecTarget;
 
 /// The dialog pins its context, namespace, resource and SSH transport.
@@ -32,9 +37,15 @@ pub(super) struct KubernetesDetails {
     target: ExecTarget,
     dispatch: FocusHandle,
     tab: usize,
-    details: Entity<TextareaState>,
+    details: Entity<EditorState>,
     overview: Vec<(&'static str, String)>,
-    output: Entity<TextareaState>,
+    output: String,
+    log_lines: Rc<Vec<LogLine>>,
+    log_scroll: UniformListScrollHandle,
+    log_measure: usize,
+    live: bool,
+    follow: bool,
+    clipped: bool,
     query: Entity<InputState>,
     containers: Vec<String>,
     container_select: Entity<SelectState<Vec<SharedString>>>,
@@ -72,8 +83,7 @@ impl KubernetesDetails {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let details = cx.new(|cx| TextareaState::new(window, cx).rows(18));
-        let output = cx.new(|cx| TextareaState::new(window, cx).rows(18));
+        let details = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(t!("k8s.log_search")));
         let container_select =
             cx.new(|cx| SelectState::new(Vec::<SharedString>::new(), None, window, cx));
@@ -152,7 +162,7 @@ impl KubernetesDetails {
             window,
             |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.filter_logs(window, cx);
+                    this.filter_logs(true, window, cx);
                 }
             },
         ));
@@ -171,7 +181,13 @@ impl KubernetesDetails {
             tab: 0,
             details,
             overview: Vec::new(),
-            output,
+            output: String::new(),
+            log_lines: Rc::new(Vec::new()),
+            log_scroll: UniformListScrollHandle::new(),
+            log_measure: 0,
+            live: false,
+            follow: true,
+            clipped: false,
             query,
             containers: Vec::new(),
             container_select,
@@ -212,9 +228,14 @@ impl KubernetesDetails {
         match command {
             KubernetesCommand::DetailTab(tab) if *tab <= 2 => {
                 self.tab = *tab;
+                if self.tab != 1 {
+                    self.log_generation += 1;
+                    self.log_task = None;
+                    self.logs_loading = false;
+                }
                 if self.tab == 1
                     && self.resource.kind == ResourceKind::Pod
-                    && self.logs.is_none()
+                    && (self.logs.is_none() || self.live)
                     && !self.logs_loading
                 {
                     self.read_logs(window, cx);
@@ -243,18 +264,37 @@ impl KubernetesDetails {
             KubernetesCommand::Previous(previous) => {
                 if self.options.previous != *previous {
                     self.options.previous = *previous;
+                    if *previous {
+                        self.live = false;
+                    }
                     self.change_logs(window, cx);
                 }
             }
             KubernetesCommand::Regex(regex) => {
                 self.regex = *regex;
-                self.filter_logs(window, cx);
+                self.filter_logs(true, window, cx);
             }
             KubernetesCommand::ReadLogs => self.read_logs(window, cx),
+            KubernetesCommand::LiveLogs(live) if !self.options.previous => {
+                self.live = *live;
+                self.log_generation += 1;
+                self.log_task = None;
+                self.logs_loading = false;
+                if self.live && self.tab == 1 {
+                    self.read_logs(window, cx);
+                }
+            }
+            KubernetesCommand::FollowLogs(follow) => {
+                self.follow = *follow;
+                if self.follow {
+                    self.log_scroll.scroll_to_bottom();
+                }
+            }
             KubernetesCommand::RefreshDetails => self.read_details(window, cx),
             KubernetesCommand::RelatedPod(name) => {
                 if let Some(pod) = self.pods.iter().find(|pod| &pod.name == name).cloned() {
                     self.resource = pod;
+                    self.live = false;
                     self.tab = 0;
                     self.overview.clear();
                     self.details
@@ -275,8 +315,9 @@ impl KubernetesDetails {
         self.log_task = None;
         self.logs_loading = false;
         self.logs = None;
+        self.clipped = false;
         self.log_problem = None;
-        self.filter_logs(window, cx);
+        self.filter_logs(true, window, cx);
         if self.tab == 1 {
             self.read_logs(window, cx);
         }
@@ -315,6 +356,7 @@ impl KubernetesDetails {
                     Err(why) => this.problem = Some(why),
                     Ok(value) => {
                         this.overview = model::overview(&value, this.resource.kind);
+                        this.resource.status = model::status(&value, this.resource.kind);
                         let text = serde_json::to_string_pretty(&value).unwrap_or_default();
                         this.details.update(cx, |state, cx| state.set_value(text, window, cx));
                         let names = model::containers(&value);
@@ -380,25 +422,51 @@ impl KubernetesDetails {
         self.log_problem = None;
         let (target, generation) = (self.target.clone(), self.log_generation);
         self.log_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = request(&target, commands::remote(&command), cx)
-                .await
-                .and_then(|output| commands::answer(&output));
-            let _ = this.update_in(cx, |this, window, cx| {
-                if this.log_generation != generation {
-                    return;
+            loop {
+                let result = request(&target, commands::remote(&command), cx)
+                    .await
+                    .and_then(|output| commands::answer(&output));
+                let keep_reading = this
+                    .update_in(cx, |this, window, cx| {
+                        if this.log_generation != generation {
+                            return false;
+                        }
+                        let mut changed = this.logs_loading;
+                        this.logs_loading = false;
+                        match result {
+                            Ok(text) => {
+                                let (text, clipped) = logs::bounded(text);
+                                changed |= this.clipped != clipped;
+                                this.clipped = clipped;
+                                if this.logs.as_ref().is_none_or(|old| old.as_str() != text) {
+                                    changed = true;
+                                    this.logs = Some(Rc::new(text));
+                                    this.filter_logs(false, window, cx);
+                                }
+                            }
+                            Err(why) => {
+                                changed = true;
+                                this.log_problem = Some(why);
+                                this.live = false;
+                            }
+                        }
+                        if changed {
+                            cx.notify();
+                        }
+                        this.live && this.tab == 1 && !this.options.previous
+                    })
+                    .unwrap_or(false);
+                if !keep_reading {
+                    break;
                 }
-                this.logs_loading = false;
-                match result {
-                    Ok(logs) => this.logs = Some(Rc::new(logs)),
-                    Err(why) => this.log_problem = Some(why),
-                }
-                this.filter_logs(window, cx);
-                cx.notify();
-            });
+                // One bounded request at a time. Closing/changing scope drops
+                // this task, including its timer and reply receiver.
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
         }));
     }
 
-    fn filter_logs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn filter_logs(&mut self, reset_scroll: bool, _: &mut Window, cx: &mut Context<Self>) {
         let query = self.query.read(cx).value();
         let logs = self.logs.as_ref().map_or("", |text| text.as_str());
         self.total = logs.lines().count();
@@ -406,14 +474,27 @@ impl KubernetesDetails {
             Ok((text, matches)) => {
                 self.matches = matches;
                 self.filter_problem = None;
-                self.output
-                    .update(cx, |state, cx| state.set_value(text, window, cx));
+                if self.output != text {
+                    self.log_lines = Rc::new(text.lines().map(LogLine::new).collect());
+                    self.log_measure = self
+                        .log_lines
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, line)| line.text.width())
+                        .map_or(0, |(ix, _)| ix);
+                    self.output = text;
+                    if self.live && self.follow {
+                        self.log_scroll.scroll_to_bottom();
+                    } else if reset_scroll {
+                        self.log_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    }
+                }
             }
             Err(why) => {
                 self.matches = 0;
                 self.filter_problem = Some(why);
-                self.output
-                    .update(cx, |state, cx| state.set_value("", window, cx));
+                self.output.clear();
+                self.log_lines = Rc::new(Vec::new());
             }
         }
         cx.notify();
@@ -427,7 +508,7 @@ impl KubernetesDetails {
             .when(self.resource.kind != ResourceKind::Pod, |body| {
                 body.child(div().text_sm().child(t!("k8s.related_pods")))
                     .when(self.pods_loading || self.loading, |body| {
-                        body.child(t!("tools.reading"))
+                        body.child(reading("k8s-pods-reading", cx))
                     })
                     .when(
                         !self.loading
@@ -456,33 +537,42 @@ impl KubernetesDetails {
                     div()
                         .h(rems(6.))
                         .child(
-                            uniform_list("k8s-related-pods", pods.len(), move |range, _, _| {
+                            uniform_list("k8s-related-pods", pods.len(), move |range, _, cx| {
                                 range
                                     .map(|ix| {
                                         let pod = &pods[ix];
                                         let handle = dispatch.clone();
                                         let name = pod.name.clone();
-                                        div().px_1().child(
-                                            Button::new(SharedString::from(format!(
-                                                "k8s-related:{}",
-                                                pod.name
-                                            )))
-                                            .ghost()
-                                            .small()
-                                            .w_full()
-                                            .justify_start()
-                                            .label(format!("{} · {}", pod.name, pod.summary))
-                                            .on_click(move |_, window, cx| {
-                                                defer_dispatch(
-                                                    &handle,
-                                                    &KubernetesAction(
-                                                        KubernetesCommand::RelatedPod(name.clone()),
-                                                    ),
-                                                    window,
-                                                    cx,
-                                                )
-                                            }),
-                                        )
+                                        h_flex()
+                                            .px_1()
+                                            .gap_2()
+                                            .child(
+                                                Button::new(SharedString::from(format!(
+                                                    "k8s-related:{}",
+                                                    pod.name
+                                                )))
+                                                .ghost()
+                                                .small()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .justify_start()
+                                                .label(format!("{} · {}", pod.name, pod.summary))
+                                                .on_click(move |_, window, cx| {
+                                                    defer_dispatch(
+                                                        &handle,
+                                                        &KubernetesAction(
+                                                            KubernetesCommand::RelatedPod(
+                                                                name.clone(),
+                                                            ),
+                                                        ),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }),
+                                            )
+                                            .when_some(pod.status.clone(), |row, (label, tone)| {
+                                                row.child(soft_tag(label, tone_color(tone, cx)))
+                                            })
                                     })
                                     .collect::<Vec<_>>()
                             })
@@ -523,6 +613,11 @@ impl KubernetesDetails {
             self.dispatch.clone(),
         );
         let count = t!("k8s.log_count", count = self.matches, total = self.total);
+        let live = self.dispatch.clone();
+        let follow = self.dispatch.clone();
+        let lines = self.log_lines.clone();
+        let dispatch = self.dispatch.clone();
+        let measure = self.log_measure;
         v_flex()
             .gap_3()
             .child(self.render_container(cx))
@@ -596,6 +691,51 @@ impl KubernetesDetails {
                     ),
             )
             .child(
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .child(
+                        Checkbox::new("k8s-live")
+                            .label(t!("k8s.live"))
+                            .checked(self.live)
+                            .disabled(
+                                !self.live
+                                    && (self.options.previous
+                                        || self.loading
+                                        || self.options.container.is_empty()),
+                            )
+                            .on_click(move |value, window, cx| {
+                                defer_dispatch(
+                                    &live,
+                                    &KubernetesAction(KubernetesCommand::LiveLogs(*value)),
+                                    window,
+                                    cx,
+                                )
+                            }),
+                    )
+                    .child(
+                        Checkbox::new("k8s-follow")
+                            .label(t!("k8s.follow"))
+                            .checked(self.follow)
+                            .on_click(move |value, window, cx| {
+                                defer_dispatch(
+                                    &follow,
+                                    &KubernetesAction(KubernetesCommand::FollowLogs(*value)),
+                                    window,
+                                    cx,
+                                )
+                            }),
+                    )
+                    .child(soft_tag("INFO", cx.theme().success))
+                    .child(soft_tag("WARN", cx.theme().warning))
+                    .child(soft_tag("ERROR", cx.theme().danger))
+                    .child(
+                        copy_button("k8s-copy-logs", self.output.clone(), &self.dispatch)
+                            .label(t!("k8s.copy_logs"))
+                            .disabled(self.output.is_empty()),
+                    ),
+            )
+            .child(
                 div()
                     .id("k8s-log-count")
                     .test_support()
@@ -612,6 +752,17 @@ impl KubernetesDetails {
             )
             .when_some(self.log_problem.clone(), |body, why| {
                 body.child(error("k8s-logs-error", &why, cx))
+            })
+            .when(self.logs_loading, |body| {
+                body.child(reading("k8s-logs-reading", cx))
+            })
+            .when(self.clipped, |body| {
+                body.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child(t!("k8s.log_clipped")),
+                )
             })
             .when(
                 self.logs.is_some()
@@ -634,14 +785,47 @@ impl KubernetesDetails {
                 div()
                     .id("k8s-log-output")
                     .test_support()
-                    .aria_label(self.output.read(cx).value())
+                    .aria_label(self.output.clone())
+                    .h(rems(20.))
+                    .min_w_0()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius)
                     .child(
-                        Textarea::new(&self.output)
-                            .readonly(true)
-                            .h(rems(20.))
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_xs(),
-                    ),
+                        uniform_list("k8s-log-lines", lines.len(), move |range, _, cx| {
+                            range
+                                .map(|ix| {
+                                    let line = &lines[ix];
+                                    let highlights = line.spans.iter().map(|(range, token)| {
+                                        (range.clone(), log_style(*token, cx))
+                                    });
+                                    h_flex()
+                                        .gap_2()
+                                        .px_2()
+                                        .py_1()
+                                        .text_xs()
+                                        .whitespace_nowrap()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .child(copy_button(
+                                            SharedString::from(format!("k8s-copy-line:{ix}")),
+                                            line.raw.clone(),
+                                            &dispatch,
+                                        ))
+                                        .child(
+                                            StyledText::new(line.text.clone())
+                                                .with_highlights(highlights),
+                                        )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full()
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
+                        .with_width_from_item(Some(measure))
+                        .track_scroll(&self.log_scroll),
+                    )
+                    .vertical_scrollbar(&self.log_scroll),
             )
             .into_any_element()
     }
@@ -728,6 +912,9 @@ impl Render for KubernetesDetails {
                     .text_sm()
                     .child(resource),
             )
+            .when_some(self.resource.status.clone(), |body, (label, tone)| {
+                body.child(h_flex().child(soft_tag(label, tone_color(tone, cx))))
+            })
             .child(
                 TabBar::new("k8s-detail-tabs")
                     .underline()
@@ -772,6 +959,11 @@ impl Render for KubernetesDetails {
                                     .min_w_0()
                                     .child(value.clone()),
                             )
+                            .child(copy_button(
+                                SharedString::from(format!("k8s-copy-field:{key}")),
+                                value.clone(),
+                                &self.dispatch,
+                            ))
                     }))
                     .child(self.render_pods(cx))
                     .child(
@@ -782,11 +974,7 @@ impl Render for KubernetesDetails {
                                     .flex_1()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(if self.loading {
-                                        t!("tools.reading")
-                                    } else {
-                                        t!("k8s.json")
-                                    }),
+                                    .child(t!("k8s.json")),
                             )
                             .child(
                                 Button::new("k8s-detail-refresh")
@@ -804,9 +992,12 @@ impl Render for KubernetesDetails {
                                     }),
                             ),
                     )
+                    .when(self.loading, |body| {
+                        body.child(reading("k8s-details-reading", cx))
+                    })
                     .child(
                         div().id("k8s-detail-json").test_support().child(
-                            Textarea::new(&self.details)
+                            Editor::new(&self.details)
                                 .readonly(true)
                                 .h(rems(12.))
                                 .font_family(cx.theme().mono_font_family.clone())
@@ -814,6 +1005,45 @@ impl Render for KubernetesDetails {
                         ),
                     ),
             })
+    }
+}
+
+fn log_style(token: Token, cx: &App) -> HighlightStyle {
+    let syntax = &cx.theme().highlight_theme.style.syntax;
+    let color = match token {
+        Token::Timestamp | Token::Debug => cx.theme().muted_foreground,
+        Token::Info => cx.theme().success,
+        Token::Warning => cx.theme().warning,
+        Token::Error => cx.theme().danger,
+        Token::Key => {
+            return syntax.style("property").unwrap_or(HighlightStyle {
+                color: Some(cx.theme().primary),
+                ..Default::default()
+            });
+        }
+        Token::String => {
+            return syntax.style("string").unwrap_or(HighlightStyle {
+                color: Some(cx.theme().success),
+                ..Default::default()
+            });
+        }
+        Token::Number => {
+            return syntax.style("number").unwrap_or(HighlightStyle {
+                color: Some(cx.theme().warning),
+                ..Default::default()
+            });
+        }
+        Token::Literal => {
+            return syntax.style("boolean").unwrap_or(HighlightStyle {
+                color: Some(cx.theme().primary),
+                ..Default::default()
+            });
+        }
+    };
+    HighlightStyle {
+        color: Some(color),
+        font_weight: matches!(token, Token::Error | Token::Warning).then_some(FontWeight::SEMIBOLD),
+        ..Default::default()
     }
 }
 

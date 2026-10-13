@@ -3,8 +3,10 @@
 
 mod commands;
 mod details;
+mod logs;
 mod model;
 mod panel;
+mod presentation;
 
 pub use model::{KubernetesCommand, ResourceKind};
 pub use panel::KubernetesPanel;

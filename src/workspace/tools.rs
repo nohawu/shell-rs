@@ -53,6 +53,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let crate::kubernetes::KubernetesCommand::CopyValue(value) = &action.0 {
+            cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+            window.push_notification(Notification::success(t!("k8s.copied")), cx);
+            return;
+        }
         self.tools.update(cx, |tools, cx| {
             tools.kubernetes_command(&action.0, window, cx)
         });

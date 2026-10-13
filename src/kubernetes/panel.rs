@@ -17,9 +17,11 @@ use super::{
     commands,
     details::KubernetesDetails,
     model::{self, KubernetesCommand, Resource, ResourceKind},
+    presentation::{copy_button, reading, tone_color},
 };
 use crate::app::KubernetesAction;
 use crate::i18n::{UiLocale, t};
+use crate::shared::soft_tag;
 use crate::terminal::{ExecTarget, exec_answer};
 
 /// Retains a single terminal's scoped browser. A change of SSH target
@@ -581,8 +583,8 @@ impl Render for KubernetesPanel {
                             .text_color(cx.theme().muted_foreground)
                             .child(count),
                     )
-                    .when(self.loading, |header| {
-                        header.child(div().text_sm().child(t!("tools.reading")))
+                    .when(self.loading && !self.rows.is_empty(), |header| {
+                        header.child(reading("k8s-reading", cx))
                     })
                     .when_some(self.problem.clone(), |header, why| {
                         header.child(
@@ -604,17 +606,17 @@ impl Render for KubernetesPanel {
                         if visible.is_empty() && self.problem.is_some() && !self.loading {
                             body
                         } else if visible.is_empty() {
-                            body.child(
-                                div()
-                                    .p_3()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(if self.loading {
-                                        t!("tools.reading")
-                                    } else {
-                                        t!("k8s.empty")
-                                    }),
-                            )
+                            if self.loading {
+                                body.child(reading("k8s-list-reading", cx))
+                            } else {
+                                body.child(
+                                    div()
+                                        .p_3()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(t!("k8s.empty")),
+                                )
+                            }
                         } else {
                             body.child(
                                 uniform_list(
@@ -643,25 +645,52 @@ impl Render for KubernetesPanel {
                                                     .py_1()
                                                     .gap_1()
                                                     .child(
-                                                        Button::new(SharedString::from(format!(
-                                                            "{}:open",
-                                                            resource.key()
-                                                        )))
-                                                        .ghost()
-                                                        .selected(
-                                                            selected.as_deref()
-                                                                == Some(resource.key().as_str()),
-                                                        )
-                                                        .small()
-                                                        .w_full()
-                                                        .justify_start()
-                                                        .label(resource.name.clone())
-                                                        .tooltip(t!("k8s.open_details"))
-                                                        .on_click(move |_, window, cx| {
-                                                            defer_dispatch(
-                                                                &handle, &action, window, cx,
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                Button::new(SharedString::from(
+                                                                    format!(
+                                                                        "{}:open",
+                                                                        resource.key()
+                                                                    ),
+                                                                ))
+                                                                .ghost()
+                                                                .selected(
+                                                                    selected.as_deref()
+                                                                        == Some(
+                                                                            resource.key().as_str(),
+                                                                        ),
+                                                                )
+                                                                .small()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .justify_start()
+                                                                .label(resource.name.clone())
+                                                                .tooltip(t!("k8s.open_details"))
+                                                                .on_click(move |_, window, cx| {
+                                                                    defer_dispatch(
+                                                                        &handle, &action, window,
+                                                                        cx,
+                                                                    )
+                                                                }),
                                                             )
-                                                        }),
+                                                            .child(copy_button(
+                                                                SharedString::from(format!(
+                                                                    "{}:copy",
+                                                                    resource.key()
+                                                                )),
+                                                                resource.name.clone(),
+                                                                &dispatch,
+                                                            )),
+                                                    )
+                                                    .when_some(
+                                                        resource.status.clone(),
+                                                        |row, (label, tone)| {
+                                                            row.child(h_flex().child(soft_tag(
+                                                                label,
+                                                                tone_color(tone, cx),
+                                                            )))
+                                                        },
                                                     )
                                                     .child(
                                                         div()

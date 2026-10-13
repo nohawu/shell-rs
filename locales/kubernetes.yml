@@ -76,8 +76,8 @@ k8s.log_count:
   zh-CN: "匹配 %{count} / %{total} 行"
   en: "%{count} / %{total} lines match"
 k8s.log_limit:
-  zh-CN: 仅检索所选时间范围和行数内读取的日志，每次最多 512 KB。实时跟踪可在“生成命令”中复制命令。
-  en: Search covers the retrieved time range and tail, up to 512 KB per request. Copy the follow command from Commands for live logs.
+  zh-CN: 缓冲区保留当前范围内最新读取的日志，最多 512 KB / 10000 行。实时预览每 2 秒刷新；超长行仅预览前 16 KB，可复制完整内容。
+  en: The buffer holds the latest retrieved window, up to 512 KB / 10000 lines. Live preview refreshes every 2 seconds; long lines display up to 16 KB and can be copied in full.
 k8s.command_note:
   zh-CN: 命令绑定当前 SSH 主机上的 context、命名空间和资源。复制后可粘贴到终端执行。
   en: Commands target this context, namespace and resource on the SSH host. Copy and paste into the terminal to run.
@@ -120,3 +120,36 @@ k8s.no_logs:
 k8s.no_log_matches:
   zh-CN: 没有符合检索条件的日志。
   en: No matching log lines.
+k8s.name:
+  zh-CN: 名称
+  en: Name
+k8s.pod_ip:
+  zh-CN: Pod IP
+  en: Pod IP
+k8s.host_ip:
+  zh-CN: 主机 IP
+  en: Host IP
+k8s.cluster_ip:
+  zh-CN: Cluster IP
+  en: Cluster IP
+k8s.external_ip:
+  zh-CN: 外部地址
+  en: External address
+k8s.node:
+  zh-CN: 节点
+  en: Node
+k8s.copied:
+  zh-CN: 已复制
+  en: Copied
+k8s.live:
+  zh-CN: 实时预览（2 秒）
+  en: Live preview (2 s)
+k8s.follow:
+  zh-CN: 自动滚动
+  en: Auto-scroll
+k8s.copy_logs:
+  zh-CN: 复制检索结果
+  en: Copy search results
+k8s.log_clipped:
+  zh-CN: 本次日志已达到缓冲上限，仅显示已读取的有界窗口，可缩小时间范围或行数。
+  en: Logs reached the buffer limit. This preview shows a bounded retrieved window; reduce the time range or tail.

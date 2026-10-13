@@ -13,6 +13,64 @@ fn pod() -> Resource {
         namespace: "production".into(),
         summary: String::new(),
         labels: String::new(),
+        status: None,
+    }
+}
+
+#[test]
+fn status_tags_require_ready_containers_and_distinguish_workload_readiness() {
+    use model::Tone;
+    let mut value = json!({"status":{"phase":"Running","containerStatuses":[{"ready":true}]}});
+    assert_eq!(
+        model::status(&value, ResourceKind::Pod),
+        Some(("Running".into(), Tone::Good))
+    );
+    value["status"]["containerStatuses"][0]["ready"] = json!(false);
+    assert_eq!(
+        model::status(&value, ResourceKind::Pod),
+        Some(("Running".into(), Tone::Warning))
+    );
+    value["status"]["containerStatuses"][0]["state"] =
+        json!({"waiting":{"reason":"CrashLoopBackOff"}});
+    assert_eq!(
+        model::status(&value, ResourceKind::Pod),
+        Some(("CrashLoopBackOff".into(), Tone::Danger))
+    );
+    assert_eq!(
+        model::status(
+            &json!({"spec":{"replicas":3},"status":{"readyReplicas":2}}),
+            ResourceKind::Deployment
+        ),
+        Some(("2/3".into(), Tone::Warning))
+    );
+    assert_eq!(
+        model::status(&json!({"spec":{"replicas":0}}), ResourceKind::StatefulSet),
+        Some(("0/0".into(), Tone::Good))
+    );
+    assert_eq!(
+        model::status(
+            &json!({"status":{"phase":"Lost"}}),
+            ResourceKind::PersistentVolumeClaim
+        ),
+        Some(("Lost".into(), Tone::Danger))
+    );
+}
+
+#[test]
+fn overview_exposes_copyable_names_addresses_and_node() {
+    let value = json!({"metadata":{"name":"api-0","namespace":"prod"},"spec":{"nodeName":"node-1"},"status":{"podIP":"10.1.0.2","hostIP":"192.168.1.1"}});
+    let rows = model::overview(&value, ResourceKind::Pod);
+    for row in [
+        ("k8s.name", "api-0"),
+        ("k8s.namespace", "prod"),
+        ("k8s.pod_ip", "10.1.0.2"),
+        ("k8s.host_ip", "192.168.1.1"),
+        ("k8s.node", "node-1"),
+    ] {
+        assert!(
+            rows.iter()
+                .any(|(key, value)| *key == row.0 && value == row.1)
+        );
     }
 }
 

@@ -77,6 +77,9 @@ pub enum KubernetesCommand {
     Previous(bool),
     Regex(bool),
     ReadLogs,
+    LiveLogs(bool),
+    FollowLogs(bool),
+    CopyValue(String),
     RefreshDetails,
     RelatedPod(String),
 }
@@ -88,6 +91,104 @@ pub(super) struct Resource {
     pub namespace: String,
     pub summary: String,
     pub labels: String,
+    pub status: Option<(String, Tone)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Tone {
+    Good,
+    Warning,
+    Danger,
+    Quiet,
+}
+
+pub(super) fn status(value: &Value, kind: ResourceKind) -> Option<(String, Tone)> {
+    let status = &value["status"];
+    let spec = &value["spec"];
+    let count = |v: &Value| v.as_u64().unwrap_or(0);
+    let readiness = |ready: u64, desired: u64| {
+        (
+            format!("{ready}/{desired}"),
+            if ready >= desired {
+                Tone::Good
+            } else {
+                Tone::Warning
+            },
+        )
+    };
+    Some(match kind {
+        ResourceKind::Pod => {
+            let states = status["containerStatuses"].as_array();
+            let reason = ["initContainerStatuses", "containerStatuses"]
+                .into_iter()
+                .flat_map(|field| status[field].as_array().into_iter().flatten())
+                .find_map(|s| s["state"]["waiting"]["reason"].as_str());
+            let phase = if value["metadata"]["deletionTimestamp"].is_string() {
+                "Terminating"
+            } else {
+                reason.unwrap_or(status["phase"].as_str().unwrap_or("Unknown"))
+            };
+            let ready = states.is_some_and(|items| {
+                !items.is_empty()
+                    && spec["containers"]
+                        .as_array()
+                        .is_none_or(|containers| containers.len() == items.len())
+                    && items.iter().all(|s| s["ready"] == true)
+            });
+            let tone = match phase {
+                "Running" if ready => Tone::Good,
+                "Succeeded" => Tone::Good,
+                "Failed"
+                | "CrashLoopBackOff"
+                | "ImagePullBackOff"
+                | "ErrImagePull"
+                | "CreateContainerConfigError" => Tone::Danger,
+                "Pending" | "Running" | "ContainerCreating" | "PodInitializing" | "Terminating" => {
+                    Tone::Warning
+                }
+                _ => Tone::Quiet,
+            };
+            (phase.to_owned(), tone)
+        }
+        ResourceKind::Deployment | ResourceKind::StatefulSet | ResourceKind::ReplicaSet => {
+            readiness(
+                count(&status["readyReplicas"]),
+                spec["replicas"].as_u64().unwrap_or(1),
+            )
+        }
+        ResourceKind::DaemonSet => readiness(
+            count(&status["numberReady"]),
+            count(&status["desiredNumberScheduled"]),
+        ),
+        ResourceKind::PersistentVolumeClaim => {
+            let phase = status["phase"].as_str().unwrap_or("Unknown");
+            (
+                phase.to_owned(),
+                match phase {
+                    "Bound" => Tone::Good,
+                    "Lost" => Tone::Danger,
+                    "Pending" => Tone::Warning,
+                    _ => Tone::Quiet,
+                },
+            )
+        }
+        ResourceKind::Job => {
+            let failed = status["conditions"].as_array().is_some_and(|conditions| {
+                conditions
+                    .iter()
+                    .any(|c| c["type"] == "Failed" && c["status"] == "True")
+            });
+            if failed {
+                ("Failed".into(), Tone::Danger)
+            } else {
+                readiness(
+                    count(&status["succeeded"]),
+                    spec["completions"].as_u64().unwrap_or(1),
+                )
+            }
+        }
+        _ => return None,
+    })
 }
 
 impl Resource {
@@ -162,6 +263,7 @@ pub(super) fn resources(output: &str, kind: ResourceKind) -> Result<Vec<Resource
                 namespace,
                 summary: summary(item, kind),
                 labels,
+                status: status(item, kind),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -184,16 +286,8 @@ fn summary(item: &Value, kind: ResourceKind) -> String {
             let restarts: u64 = statuses.map_or(0, |items| {
                 items.iter().map(|s| count(&s["restartCount"])).sum()
             });
-            let reason = statuses.and_then(|items| {
-                items
-                    .iter()
-                    .find_map(|s| s["state"]["waiting"]["reason"].as_str())
-            });
-            let phase = if item["metadata"]["deletionTimestamp"].is_string() {
-                "Terminating"
-            } else {
-                reason.unwrap_or(status["phase"].as_str().unwrap_or("Unknown"))
-            };
+            let phase =
+                self::status(item, kind).map_or_else(|| "Unknown".to_owned(), |(phase, _)| phase);
             format!(
                 "{phase} · {ready}/{total} · ↻ {restarts} · {}",
                 text(&spec["nodeName"])
@@ -340,6 +434,28 @@ pub(super) fn overview(value: &Value, kind: ResourceKind) -> Vec<(&'static str, 
         .collect::<Vec<_>>()
         .join("\n");
     let mut rows = vec![("k8s.summary", summary(value, kind))];
+    for (key, field) in [
+        ("k8s.name", &value["metadata"]["name"]),
+        ("k8s.namespace", &value["metadata"]["namespace"]),
+        ("k8s.pod_ip", &value["status"]["podIP"]),
+        ("k8s.host_ip", &value["status"]["hostIP"]),
+        ("k8s.cluster_ip", &value["spec"]["clusterIP"]),
+        ("k8s.node", &value["spec"]["nodeName"]),
+    ] {
+        if let Some(text) = field.as_str().filter(|text| !text.is_empty()) {
+            rows.push((key, text.to_owned()));
+        }
+    }
+    if let Some(addresses) = value["status"]["loadBalancer"]["ingress"].as_array() {
+        let addresses = addresses
+            .iter()
+            .filter_map(|a| a["ip"].as_str().or_else(|| a["hostname"].as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !addresses.is_empty() {
+            rows.push(("k8s.external_ip", addresses));
+        }
+    }
     if let Some(created) = value["metadata"]["creationTimestamp"].as_str() {
         rows.push(("k8s.created", created.to_owned()));
     }

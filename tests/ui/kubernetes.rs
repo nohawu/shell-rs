@@ -23,7 +23,7 @@ __SHELLRS_K8S_EXIT__:0
 const DEPLOYMENTS: &str = r#"{"items":[{"metadata":{"name":"api","namespace":"prod"},"spec":{"replicas":3},"status":{"readyReplicas":2}}]}
 __SHELLRS_K8S_EXIT__:0
 "#;
-const POD_DETAIL: &str = r#"{"kind":"Pod","metadata":{"name":"api-0","namespace":"prod"},"spec":{"containers":[{"name":"api","image":"api:v1"},{"name":"sidecar","image":"sidecar:v1"}],"initContainers":[{"name":"init"}],"ephemeralContainers":[{"name":"debug"}]},"status":{"phase":"Running"}}
+const POD_DETAIL: &str = r#"{"kind":"Pod","metadata":{"name":"api-0","namespace":"prod"},"spec":{"containers":[{"name":"api","image":"api:v1"},{"name":"sidecar","image":"sidecar:v1"}],"initContainers":[{"name":"init"}],"ephemeralContainers":[{"name":"debug"}]},"status":{"phase":"Running","podIP":"10.1.0.2"}}
 __SHELLRS_K8S_EXIT__:0
 "#;
 const DEPLOY_DETAIL: &str = r#"{"kind":"Deployment","metadata":{"name":"api","namespace":"prod"},"spec":{"replicas":3,"selector":{"matchLabels":{"app":"api"}}},"status":{"readyReplicas":2}}
@@ -457,6 +457,168 @@ async fn reply(
     // An obsolete query intentionally has no receiver left.
     let _ = pending.reply.send(Ok(output.to_owned()));
     cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+async fn kubernetes_live_logs_are_serial_cancelable_and_copyable(cx: &mut TestAppContext) {
+    let factory = Arc::new(PendingFactory::default());
+    let (handle, _) = open_workspace_with_remote_factory(cx, HostStore::seed(), factory.clone());
+    in_frame(cx, handle, |window, cx| {
+        window.click(("terminal-tab", INITIAL_WEB_TERMINAL), cx)
+    });
+    in_frame(cx, handle, |window, cx| window.click("tool-kubernetes", cx));
+    reply(cx, handle, &factory, CONTEXTS).await;
+    reply(cx, handle, &factory, NAMESPACES).await;
+    reply(cx, handle, &factory, PODS).await;
+    label(cx, handle, "k8s-count", "2 项资源 · 2 个命名空间").await;
+    in_frame(cx, handle, |window, cx| {
+        window.click("k8s-resource:pods:prod/api-0:copy", cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("api-0")
+        )
+    });
+    in_frame(cx, handle, |window, cx| {
+        window.click("k8s-resource:pods:prod/api-0:open", cx)
+    });
+    reply(cx, handle, &factory, POD_DETAIL).await;
+    label(cx, handle, "k8s-overview:k8s.pod_ip", "10.1.0.2").await;
+    in_frame(cx, handle, |window, cx| {
+        window.click("k8s-copy-field:k8s.pod_ip", cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("10.1.0.2")
+        )
+    });
+    in_frame(cx, handle, |window, cx| {
+        window.within("k8s-detail-tabs").click(1usize, cx)
+    });
+    reply(cx, handle, &factory, LOGS).await;
+    label(cx, handle, "k8s-log-count", "匹配 3 / 3 行").await;
+    in_frame(cx, handle, |window, cx| {
+        window.click("k8s-log-search", cx);
+        window.input("ERROR", cx);
+        window.click("k8s-live", cx);
+    });
+    const LIVE_LOGS: &str = "2026-10-12T01:00:03Z ERROR {\"message\":\"新日志\",\"code\":500}\n2026-10-12T01:00:04Z INFO ok\n\n__SHELLRS_K8S_EXIT__:0\n";
+    reply(cx, handle, &factory, LIVE_LOGS).await;
+    label(cx, handle, "k8s-log-count", "匹配 1 / 2 行").await;
+    in_frame(cx, handle, |window, cx| window.click("k8s-copy-logs", cx));
+    cx.update(|cx| {
+        let copy = cx.read_from_clipboard().unwrap().text().unwrap();
+        assert!(copy.contains("新日志"));
+        assert!(!copy.contains("INFO"));
+    });
+    cx.executor().advance_clock(Duration::from_secs(3));
+    cx.run_until_parked();
+    cx.wait_for(handle.into(), Duration::from_secs(5), |_, _| {
+        factory.pending.lock().unwrap().len() == 1
+    })
+    .await;
+    let queries = factory.commands.lock().unwrap().len();
+    // A slow request never causes another request to be queued.
+    cx.executor().advance_clock(Duration::from_secs(20));
+    cx.run_until_parked();
+    assert_eq!(factory.commands.lock().unwrap().len(), queries);
+    in_frame(cx, handle, |window, cx| window.click("k8s-live", cx));
+    reply(
+        cx,
+        handle,
+        &factory,
+        "late ERROR reply\n__SHELLRS_K8S_EXIT__:0\n",
+    )
+    .await;
+    in_frame(cx, handle, |window, _| {
+        assert_eq!(window.find("k8s-live").checked(), Some(false));
+        assert!(
+            window
+                .find("k8s-log-output")
+                .label()
+                .unwrap()
+                .contains("新日志")
+        );
+        assert!(
+            !window
+                .find("k8s-log-output")
+                .label()
+                .unwrap()
+                .contains("late")
+        );
+    });
+    cx.executor().advance_clock(Duration::from_secs(60));
+    cx.run_until_parked();
+    assert_eq!(factory.commands.lock().unwrap().len(), queries);
+    // Leaving the page also cancels its timer; returning resumes live mode.
+    in_frame(cx, handle, |window, cx| window.click("k8s-live", cx));
+    reply(cx, handle, &factory, LIVE_LOGS).await;
+    in_frame(cx, handle, |window, cx| {
+        window.within("k8s-detail-tabs").click(2usize, cx)
+    });
+    let queries = factory.commands.lock().unwrap().len();
+    cx.executor().advance_clock(Duration::from_secs(60));
+    cx.run_until_parked();
+    assert_eq!(factory.commands.lock().unwrap().len(), queries);
+    in_frame(cx, handle, |window, cx| {
+        window.within("k8s-detail-tabs").click(1usize, cx)
+    });
+    reply(cx, handle, &factory, "Forbidden\n__SHELLRS_K8S_EXIT__:1\n").await;
+    label(cx, handle, "k8s-logs-error", "Forbidden (exit 1)").await;
+    in_frame(cx, handle, |window, _| {
+        assert_eq!(window.find("k8s-live").checked(), Some(false))
+    });
+    // Closing during an outstanding live read rejects its reply and timer.
+    in_frame(cx, handle, |window, cx| window.click("k8s-live", cx));
+    cx.wait_for(handle.into(), Duration::from_secs(5), |_, _| {
+        !factory.pending.lock().unwrap().is_empty()
+    })
+    .await;
+    in_frame(cx, handle, |window, cx| {
+        window.click("k8s-detail-close", cx)
+    });
+    reply(cx, handle, &factory, LIVE_LOGS).await;
+    let queries = factory.commands.lock().unwrap().len();
+    cx.executor().advance_clock(Duration::from_secs(60));
+    cx.run_until_parked();
+    assert_eq!(factory.commands.lock().unwrap().len(), queries);
+    in_frame(cx, handle, |window, _| {
+        assert!(window.try_find("k8s-details").is_none())
+    });
+}
+
+#[gpui_kit::test]
+async fn kubernetes_log_buffer_bounds_and_virtualizes_large_results(cx: &mut TestAppContext) {
+    let logs = (0..20_000)
+        .map(|ix| format!("INFO line-{ix}\n"))
+        .collect::<String>()
+        + "__SHELLRS_K8S_EXIT__:0\n";
+    let factory = Arc::new(FakeTerminalFactory::answering(&[
+        CONTEXTS, NAMESPACES, PODS, POD_DETAIL, &logs,
+    ]));
+    let handle = open_kubernetes(cx, factory);
+    label(cx, handle, "k8s-count", "2 项资源 · 2 个命名空间").await;
+    in_frame(cx, handle, |window, cx| {
+        window.click("k8s-resource:pods:prod/api-0:open", cx)
+    });
+    label(cx, handle, "k8s-overview:k8s.pod_ip", "10.1.0.2").await;
+    in_frame(cx, handle, |window, cx| {
+        window.within("k8s-detail-tabs").click(1usize, cx)
+    });
+    label(cx, handle, "k8s-log-count", "匹配 10000 / 10000 行").await;
+    in_frame(cx, handle, |window, cx| {
+        // Thousands of off-screen rows have no rendered element.
+        assert!(window.try_find("k8s-copy-line:5000").is_none());
+        window.click("k8s-copy-logs", cx);
+    });
+    cx.update(|cx| {
+        let copy = cx.read_from_clipboard().unwrap().text().unwrap();
+        assert_eq!(copy.lines().count(), 10_000);
+        assert!(copy.starts_with("INFO line-10000\n"));
+        assert!(copy.ends_with("INFO line-19999"));
+    });
 }
 
 #[gpui_kit::test]
