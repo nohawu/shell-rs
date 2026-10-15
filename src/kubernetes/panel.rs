@@ -6,8 +6,12 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
+    menu::{ContextMenuExt as _, DropdownMenu as _},
+    notification::Notification,
     scroll::ScrollableElement as _,
-    select::{Select, SelectEvent, SelectState},
+    select::{SearchableVec, Select, SelectEvent, SelectState},
+    tab::{Tab, TabBar},
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -17,11 +21,10 @@ use super::{
     commands,
     details::KubernetesDetails,
     model::{self, KubernetesCommand, Resource, ResourceKind},
-    presentation::{copy_button, reading, tone_color},
+    presentation::{reading, resource_menu, tone_color},
 };
-use crate::app::KubernetesAction;
+use crate::app::{CatalogIcon, KubernetesAction};
 use crate::i18n::{UiLocale, t};
-use crate::shared::soft_tag;
 use crate::terminal::{ExecTarget, exec_answer};
 
 /// Retains a single terminal's scoped browser. A change of SSH target
@@ -35,10 +38,12 @@ pub struct KubernetesPanel {
     namespaces: Vec<String>,
     namespaces_ready: bool,
     kind: ResourceKind,
+    section: usize,
+    resource_kind: ResourceKind,
     rows: Rc<Vec<Resource>>,
     selected: Option<String>,
-    context_select: Entity<SelectState<Vec<SharedString>>>,
-    namespace_select: Entity<SelectState<Vec<SharedString>>>,
+    context_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    namespace_select: Entity<SelectState<SearchableVec<SharedString>>>,
     kind_select: Entity<SelectState<Vec<SharedString>>>,
     search: Entity<InputState>,
     query: String,
@@ -46,6 +51,7 @@ pub struct KubernetesPanel {
     problem: Option<String>,
     generation: u64,
     task: Option<Task<()>>,
+    poll_task: Option<Task<()>>,
     details: Option<WeakEntity<KubernetesDetails>>,
     scroll: UniformListScrollHandle,
     dispatch: FocusHandle,
@@ -57,11 +63,17 @@ pub struct KubernetesPanel {
 impl KubernetesPanel {
     pub fn new(dispatch: FocusHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let context_select = cx.new(|cx| {
-            SelectState::new(Vec::<SharedString>::new(), None, window, cx).searchable(true)
+            SelectState::new(SearchableVec::<SharedString>::new(vec![]), None, window, cx)
+                .searchable(true)
         });
         let namespace_select = cx.new(|cx| {
-            SelectState::new(vec![t!("k8s.all")], Some(IndexPath::new(0)), window, cx)
-                .searchable(true)
+            SelectState::new(
+                SearchableVec::new(vec![t!("k8s.all")]),
+                Some(IndexPath::new(0)),
+                window,
+                cx,
+            )
+            .searchable(true)
         });
         let kind_select = cx.new(|cx| {
             SelectState::new(
@@ -84,7 +96,7 @@ impl KubernetesPanel {
         subscriptions.push(cx.subscribe_in(
             &context_select,
             window,
-            move |_, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+            move |_, _, event: &SelectEvent<SearchableVec<SharedString>>, window, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
                     defer_dispatch(
                         &handle,
@@ -99,10 +111,9 @@ impl KubernetesPanel {
         subscriptions.push(cx.subscribe_in(
             &namespace_select,
             window,
-            move |_, state, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+            move |_, _, event: &SelectEvent<SearchableVec<SharedString>>, window, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let namespace = (state.read(cx).selected_index(cx) != Some(IndexPath::new(0)))
-                        .then(|| value.to_string());
+                    let namespace = (value != &t!("k8s.all")).then(|| value.to_string());
                     defer_dispatch(
                         &handle,
                         &KubernetesAction(KubernetesCommand::Namespace(namespace)),
@@ -157,6 +168,8 @@ impl KubernetesPanel {
             namespaces: Vec::new(),
             namespaces_ready: false,
             kind: ResourceKind::Pod,
+            section: 1,
+            resource_kind: ResourceKind::Pod,
             rows: Rc::new(Vec::new()),
             selected: None,
             context_select,
@@ -168,6 +181,7 @@ impl KubernetesPanel {
             problem: None,
             generation: 0,
             task: None,
+            poll_task: None,
             details: None,
             scroll: UniformListScrollHandle::new(),
             dispatch,
@@ -182,6 +196,9 @@ impl KubernetesPanel {
             return;
         }
         if self.target != target {
+            if let Some(details) = self.details.take().and_then(|details| details.upgrade()) {
+                details.update(cx, |details, cx| details.stop_reads(cx));
+            }
             self.context = None;
             self.contexts.clear();
             self.namespace = None;
@@ -190,7 +207,6 @@ impl KubernetesPanel {
             self.rows = Rc::new(Vec::new());
             self.selected = None;
             self.scroll.scroll_to_item(0, ScrollStrategy::Top);
-            self.details = None;
             let entity = cx.entity().downgrade();
             let window_handle = self.window;
             cx.defer(move |cx| {
@@ -201,7 +217,38 @@ impl KubernetesPanel {
         }
         self.target = target;
         self.active = active;
+        self.poll_task = None;
         self.read(true, cx);
+        if self.active && self.target.is_some() {
+            self.poll_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_secs(30))
+                        .await;
+                    if this
+                        .update(cx, |this, cx| {
+                            // Local search never issues queries. Poll only visible, idle
+                            // lists, and leave errors for an explicit user retry.
+                            if !this.loading
+                                && this.problem.is_none()
+                                && this.rows.len() <= 1000
+                                && this
+                                    .details
+                                    .as_ref()
+                                    .and_then(WeakEntity::upgrade)
+                                    .is_none()
+                            {
+                                this.read(false, cx);
+                                cx.notify();
+                            }
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }));
+        }
         cx.notify();
     }
 
@@ -212,6 +259,19 @@ impl KubernetesPanel {
         cx: &mut Context<Self>,
     ) {
         match command {
+            KubernetesCommand::Section(section) if *section <= 1 => {
+                if self.section != *section {
+                    self.section = *section;
+                    self.kind = match section {
+                        0 => ResourceKind::Node,
+                        _ => self.resource_kind,
+                    };
+                    self.rows = Rc::new(Vec::new());
+                    self.selected = None;
+                    self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    self.read(false, cx);
+                }
+            }
             KubernetesCommand::Refresh => self.read(true, cx),
             KubernetesCommand::Context(context) if self.contexts.contains(context) => {
                 if self.context.as_ref() != Some(context) {
@@ -240,6 +300,8 @@ impl KubernetesPanel {
             }
             KubernetesCommand::Kind(kind) => {
                 if self.kind != *kind {
+                    self.section = 1;
+                    self.resource_kind = *kind;
                     self.kind = *kind;
                     self.rows = Rc::new(Vec::new());
                     self.selected = None;
@@ -247,7 +309,23 @@ impl KubernetesPanel {
                     self.read(false, cx);
                 }
             }
-            KubernetesCommand::Details { namespace, name } => {
+            KubernetesCommand::Changed { terminal, context } => {
+                if self
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.terminal.0 == *terminal)
+                    && self.context.as_ref() == Some(context)
+                {
+                    self.read(false, cx);
+                }
+            }
+            KubernetesCommand::Details { namespace, name }
+            | KubernetesCommand::Manage {
+                namespace, name, ..
+            } => {
+                if matches!(command, KubernetesCommand::Manage { kind, .. } if *kind != self.kind) {
+                    return;
+                }
                 if let (Some(target), Some(context), Some(resource)) = (
                     self.target.clone(),
                     self.context.clone(),
@@ -267,6 +345,9 @@ impl KubernetesPanel {
                             cx,
                         )
                     });
+                    if let KubernetesCommand::Manage { operation, .. } = command {
+                        view.update(cx, |view, cx| view.queue_operation(*operation, window, cx));
+                    }
                     self.details = Some(view.downgrade());
                     let title = format!("Kubernetes · {context}");
                     let dispatch = self.dispatch.clone();
@@ -302,7 +383,9 @@ impl KubernetesPanel {
                                             }),
                                     ),
                             )
-                            .w(rems(58.).to_pixels(window.rem_size()))
+                            .w(rems(58.)
+                                .to_pixels(window.rem_size())
+                                .min(window.viewport_size().width * 0.94))
                             .max_h(window.viewport_size().height * 0.9)
                             .close_button(false)
                             .overlay_closable(true)
@@ -325,6 +408,9 @@ impl KubernetesPanel {
             command => {
                 if let Some(details) = self.details.as_ref().and_then(WeakEntity::upgrade) {
                     details.update(cx, |details, cx| details.command(command, window, cx));
+                } else if matches!(command, KubernetesCommand::ConfirmMutation(_)) {
+                    window
+                        .push_notification(Notification::error(t!("k8s.confirmation_expired")), cx);
                 }
             }
         }
@@ -339,26 +425,27 @@ impl KubernetesPanel {
                     .iter()
                     .cloned()
                     .map(SharedString::from)
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 window,
                 cx,
             );
-            let ix = self
-                .contexts
-                .iter()
-                .position(|name| Some(name) == self.context.as_ref());
-            state.set_selected_index(ix.map(IndexPath::new), window, cx);
+            if let Some(context) = &self.context {
+                state.set_selected_value(&SharedString::from(context.clone()), window, cx);
+            } else {
+                state.set_selected_index(None, window, cx);
+            }
         });
         self.namespace_select.update(cx, |state, cx| {
             let mut names = vec![t!("k8s.all")];
             names.extend(self.namespaces.iter().cloned().map(SharedString::from));
-            state.set_items(names, window, cx);
-            let ix = self
+            state.set_items(names.into(), window, cx);
+            let selected = self
                 .namespace
-                .as_ref()
-                .and_then(|ns| self.namespaces.iter().position(|name| name == ns))
-                .map_or(0, |ix| ix + 1);
-            state.set_selected_index(Some(IndexPath::new(ix)), window, cx);
+                .clone()
+                .map(SharedString::from)
+                .unwrap_or_else(|| t!("k8s.all"));
+            state.set_selected_value(&selected, window, cx);
         });
         self.kind_select.update(cx, |state, cx| {
             state.set_selected_index(
@@ -384,6 +471,7 @@ impl KubernetesPanel {
         };
         self.loading = true;
         self.problem = None;
+        let retain_rows = !self.rows.is_empty();
         let (generation, window, context, namespace, kind) = (
             self.generation,
             self.window,
@@ -417,8 +505,16 @@ impl KubernetesPanel {
                     this.problem = Some(t!("tools.not_connected").to_string());
                     cx.notify();
                 });
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
             };
+            let _ = this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.problem = None;
+                    cx.notify();
+                }
+            });
             let first = exec_answer(reply, cx)
                 .await
                 .unwrap_or_else(|| Err(t!("tools.not_connected").to_string()));
@@ -445,7 +541,26 @@ impl KubernetesPanel {
                         })
                     });
                     let namespaces = request(&target, commands::namespaces(&name), cx).await?;
-                    let namespaces = model::names(&commands::answer(&namespaces)?)?;
+                    let namespaces = super::query::fetch(
+                        &target,
+                        commands::ListQuery::new(&name, None, ResourceKind::Namespace),
+                        Some(namespaces),
+                        cx,
+                        |_, _| true,
+                    )
+                    .await?;
+                    let mut namespaces = namespaces
+                        .iter()
+                        .map(|value| {
+                            value["metadata"]["name"]
+                                .as_str()
+                                .filter(|name| !name.is_empty())
+                                .map(str::to_owned)
+                                .ok_or_else(|| t!("k8s.incomplete").to_string())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    namespaces.sort();
+                    namespaces.dedup();
                     selected_namespace = selected_namespace.filter(|ns| namespaces.contains(ns));
                     let _ = cx.update_window(window, |_, window, cx| {
                         this.update(cx, |this, cx| {
@@ -464,9 +579,51 @@ impl KubernetesPanel {
                         cx,
                     )
                     .await?;
-                    model::resources(&commands::answer(&output)?, kind)
+                    read_rows(
+                        &target,
+                        &name,
+                        selected_namespace.as_deref(),
+                        kind,
+                        &output,
+                        cx,
+                        |rows, cx| {
+                            this.update(cx, |this, cx| {
+                                if this.generation != generation {
+                                    return false;
+                                }
+                                if !retain_rows {
+                                    this.rows = Rc::new(rows);
+                                    cx.notify();
+                                }
+                                true
+                            })
+                            .unwrap_or(false)
+                        },
+                    )
+                    .await
                 } else {
-                    model::resources(&commands::answer(&first)?, kind)
+                    read_rows(
+                        &target,
+                        chosen.as_deref().unwrap_or_default(),
+                        selected_namespace.as_deref(),
+                        kind,
+                        &first,
+                        cx,
+                        |rows, cx| {
+                            this.update(cx, |this, cx| {
+                                if this.generation != generation {
+                                    return false;
+                                }
+                                if !retain_rows {
+                                    this.rows = Rc::new(rows);
+                                    cx.notify();
+                                }
+                                true
+                            })
+                            .unwrap_or(false)
+                        },
+                    )
+                    .await
                 }
             }
             .await;
@@ -503,6 +660,38 @@ pub(super) async fn request(
         .unwrap_or_else(|| Err(t!("tools.not_connected").to_string()))
 }
 
+async fn read_rows(
+    target: &ExecTarget,
+    context: &str,
+    namespace: Option<&str>,
+    kind: ResourceKind,
+    output: &str,
+    cx: &mut AsyncApp,
+    mut progress: impl FnMut(Vec<Resource>, &mut AsyncApp) -> bool,
+) -> Result<Vec<Resource>, String> {
+    let mut rows = Vec::new();
+    let mut problem = None;
+    super::query::fetch(
+        target,
+        commands::ListQuery::new(context, namespace, kind),
+        Some(output.into()),
+        cx,
+        |page, cx| {
+            match model::resource_items(page, kind) {
+                Ok(page) => rows.extend(page),
+                Err(why) => {
+                    problem = Some(why);
+                    return false;
+                }
+            }
+            rows.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+            progress(rows.clone(), cx)
+        },
+    )
+    .await
+    .map_err(|why| problem.take().unwrap_or(why))?;
+    Ok(rows)
+}
 impl Focusable for KubernetesPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -522,6 +711,7 @@ impl Render for KubernetesPanel {
         let refresh = self.dispatch.clone();
         let dispatch = self.dispatch.clone();
         let selected = self.selected.clone();
+        let sections = self.dispatch.clone();
         let count = t!(
             "k8s.count",
             count = visible.len(),
@@ -539,14 +729,28 @@ impl Render for KubernetesPanel {
                     .gap_2()
                     .flex_shrink_0()
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().flex_1().text_sm().child(t!("k8s.context")))
+                        h_flex().gap_2().child(TabBar::new("k8s-sections")
+                            .flex_1().min_w_0()
+                            .underline()
+                            .small()
+                            .selected_index(self.section)
+                            .child(Tab::new().label(t!("k8s.nodes")))
+                            .child(Tab::new().label(t!("k8s.resources")))
+                            .on_click(move |ix, window, cx| {
+                                defer_dispatch(
+                                    &sections,
+                                    &KubernetesAction(KubernetesCommand::Section(*ix)),
+                                    window,
+                                    cx,
+                                )
+                            }))
                             .child(
                                 Button::new("k8s-refresh")
                                     .ghost()
                                     .small()
-                                    .label(t!("tools.refresh"))
+                                    .icon(CatalogIcon::RefreshCw)
+                                    .tooltip(t!("tools.refresh"))
+                                    .accessibility_label(t!("tools.refresh"))
                                     .loading(self.loading)
                                     .on_click(move |_, window, cx| {
                                         defer_dispatch(
@@ -559,20 +763,27 @@ impl Render for KubernetesPanel {
                             ),
                     )
                     .child(
-                        Select::new(&self.context_select)
+                        scope_field(t!("k8s.context"), Select::new(&self.context_select)
                             .id("k8s-context")
+                            .accessibility_label(t!("k8s.context"))
+                            .flex_1().min_w_0()
                             .small()
-                            .disabled(self.contexts.is_empty()),
+                            .disabled(self.contexts.is_empty())),
                     )
-                    .child(div().text_sm().child(t!("k8s.namespace")))
-                    .child(
-                        Select::new(&self.namespace_select)
+                    .when(self.kind.namespaced(), |header| header.child(
+                        scope_field(t!("k8s.namespace"), Select::new(&self.namespace_select)
                             .id("k8s-namespace")
+                            .accessibility_label(t!("k8s.namespace"))
+                            .flex_1().min_w_0()
                             .small()
-                            .disabled(self.context.is_none()),
-                    )
-                    .child(div().text_sm().child(t!("k8s.kind")))
-                    .child(Select::new(&self.kind_select).id("k8s-kind").small())
+                            .disabled(self.context.is_none() || !self.namespaces_ready)),
+                    ))
+                    .when(self.section == 1, |header| {
+                        header
+                            .child(scope_field(t!("k8s.kind"), Select::new(&self.kind_select).id("k8s-kind")
+                                    .accessibility_label(t!("k8s.kind"))
+                                    .flex_1().min_w_0().small()))
+                    })
                     .child(Input::new(&self.search).id("k8s-search").small())
                     .child(
                         div()
@@ -614,7 +825,7 @@ impl Render for KubernetesPanel {
                                         .p_3()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(t!("k8s.empty")),
+                                        .child(if self.query.trim().is_empty() { t!("k8s.empty") } else { t!("k8s.no_matches") }),
                                 )
                             }
                         } else {
@@ -632,77 +843,56 @@ impl Render for KubernetesPanel {
                                                         name: resource.name.clone(),
                                                     });
                                                 let handle = dispatch.clone();
-                                                v_flex()
-                                                    .id(SharedString::from(resource.key()))
+                                                let key = resource.key();
+                                                let scope = if resource.namespace.is_empty() {
+                                                    resource.summary.clone()
+                                                } else {
+                                                    format!("{} · {}", resource.namespace, resource.summary)
+                                                };
+                                                let menu_resource = (resource.kind, resource.namespace.clone(), resource.name.clone());
+                                                let menu_handle = dispatch.clone();
+                                                let more_resource = menu_resource.clone();
+                                                let more_handle = dispatch.clone();
+                                                let (status, tone) = resource.status.clone()
+                                                    .unwrap_or(("—".into(), model::Tone::Quiet));
+                                                let full_scope = scope.clone();
+                                                let full_status = status.clone();
+                                                let full_name = resource.name.clone();
+                                                div()
+                                                    .id(SharedString::from(key.clone()))
                                                     .test_support()
-                                                    .aria_label(format!(
-                                                        "{}/{} · {}",
-                                                        resource.namespace,
-                                                        resource.name,
-                                                        resource.summary
-                                                    ))
-                                                    .px_3()
-                                                    .py_1()
-                                                    .gap_1()
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .child(
-                                                                Button::new(SharedString::from(
-                                                                    format!(
-                                                                        "{}:open",
-                                                                        resource.key()
-                                                                    ),
-                                                                ))
-                                                                .ghost()
-                                                                .selected(
-                                                                    selected.as_deref()
-                                                                        == Some(
-                                                                            resource.key().as_str(),
-                                                                        ),
-                                                                )
-                                                                .small()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .justify_start()
-                                                                .label(resource.name.clone())
-                                                                .tooltip(t!("k8s.open_details"))
-                                                                .on_click(move |_, window, cx| {
-                                                                    defer_dispatch(
-                                                                        &handle, &action, window,
-                                                                        cx,
-                                                                    )
-                                                                }),
-                                                            )
-                                                            .child(copy_button(
-                                                                SharedString::from(format!(
-                                                                    "{}:copy",
-                                                                    resource.key()
-                                                                )),
-                                                                resource.name.clone(),
-                                                                &dispatch,
-                                                            )),
-                                                    )
-                                                    .when_some(
-                                                        resource.status.clone(),
-                                                        |row, (label, tone)| {
-                                                            row.child(h_flex().child(soft_tag(
-                                                                label,
-                                                                tone_color(tone, cx),
-                                                            )))
-                                                        },
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .truncate()
-                                                            .text_color(cx.theme().muted_foreground)
-                                                            .child(format!(
-                                                                "{} · {}",
-                                                                resource.namespace,
-                                                                resource.summary
-                                                            )),
-                                                    )
+                                                    .aria_label(format!("{}/{} · {}", resource.namespace, resource.name, resource.summary))
+                                                    .w_full()
+                                                    .child(h_flex().gap_1()
+                                                        .child(Button::new(SharedString::from(format!("{key}:open")))
+                                                            .ghost()
+                                                            .small()
+                                                            .selected(selected.as_deref() == Some(key.as_str()))
+                                                            .flex_1().min_w_0()
+                                                            // UniformList measures one row: optional status must not change its height.
+                                                            .h(rems(3.5))
+                                                            .px_3()
+                                                            .justify_start()
+                                                            .tooltip(t!("k8s.open_details"))
+                                                            .child(v_flex().flex_1().min_w_0().gap_1()
+                                                                .child(h_flex().gap_2()
+                                                                    .child(div().id(SharedString::from(format!("{key}:name"))).test_support()
+                                                                        .flex_1().min_w_0().truncate().text_sm()
+                                                                        .font_weight(FontWeight::MEDIUM)
+                                                                        .tooltip(move |window, cx| Tooltip::new(full_name.clone()).build(window, cx))
+                                                                        .child(resource.name.clone()))
+                                                                    .child(div().id(SharedString::from(format!("{key}:status"))).test_support().w(rems(5.)).flex_shrink_0().text_right().text_xs()
+                                                                        .truncate().text_color(tone_color(tone, cx))
+                                                                        .tooltip(move |window, cx| Tooltip::new(full_status.clone()).build(window, cx)).child(status)))
+                                                                .child(div().id(SharedString::from(format!("{key}:summary"))).test_support()
+                                                                    .text_xs().text_color(cx.theme().muted_foreground).truncate()
+                                                                    .tooltip(move |window, cx| Tooltip::new(full_scope.clone()).build(window, cx))
+                                                                    .child(scope)))
+                                                            .on_click(move |_, window, cx| defer_dispatch(&handle, &action, window, cx)))
+                                                        .child(Button::new(SharedString::from(format!("{key}:more"))).ghost().small().icon(IconName::Ellipsis)
+                                                            .tooltip(t!("k8s.resource_actions")).accessibility_label(t!("k8s.resource_actions"))
+                                                            .dropdown_menu(move |menu, _, _| resource_menu(menu, more_resource.0, &more_resource.1, &more_resource.2, &more_handle))))
+                                                    .context_menu(move |menu, _, _| resource_menu(menu, menu_resource.0, &menu_resource.1, &menu_resource.2, &menu_handle))
                                             })
                                             .collect::<Vec<_>>()
                                     },
@@ -715,6 +905,14 @@ impl Render for KubernetesPanel {
                     .vertical_scrollbar(&self.scroll),
             )
     }
+}
+
+/// Scope controls share one label lane and leave the rest to the selector.
+fn scope_field(label: SharedString, field: impl IntoElement) -> Div {
+    h_flex()
+        .gap_2()
+        .child(div().w(rems(5.5)).flex_shrink_0().text_sm().child(label))
+        .child(field)
 }
 
 // Select subscriptions run inside the panel update. Route commands only

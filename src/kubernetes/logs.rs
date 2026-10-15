@@ -27,9 +27,10 @@ pub(super) struct LogLine {
 
 impl LogLine {
     pub fn new(line: &str) -> Self {
-        let end = boundary(line, DISPLAY_BYTES);
-        let mut text = line[..end].to_owned();
-        if end < line.len() {
+        let display = super::format::log_line(line);
+        let end = boundary(&display, DISPLAY_BYTES);
+        let mut text = display[..end].to_owned();
+        if end < display.len() {
             text.push('…');
         }
         let spans = tokens(&text);

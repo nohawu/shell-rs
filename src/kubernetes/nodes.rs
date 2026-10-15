@@ -1,5 +1,4 @@
 //! Node capacity and system information are independent of optional metrics.
-use crate::i18n::t;
 use serde_json::Value;
 
 pub(super) fn summary(value: &Value) -> String {
@@ -12,7 +11,7 @@ pub(super) fn summary(value: &Value) -> String {
     format!(
         "CPU {} · {} · {ip}",
         capacity["cpu"].as_str().unwrap_or("—"),
-        capacity["memory"].as_str().unwrap_or("—")
+        super::format::memory(capacity["memory"].as_str().unwrap_or("—"))
     )
 }
 
@@ -54,7 +53,12 @@ pub(super) fn overview(value: &Value) -> Vec<(&'static str, String)> {
         ),
     ] {
         if let Some(text) = field.as_str().filter(|s| !s.is_empty()) {
-            rows.push((key, text.to_owned()));
+            let text = match key {
+                "k8s.created" => super::format::time(text),
+                "k8s.memory_capacity" | "k8s.memory_allocatable" => super::format::memory(text),
+                _ => text.to_owned(),
+            };
+            rows.push((key, text));
         }
     }
     if let Some(addresses) = value["status"]["addresses"].as_array() {
@@ -121,32 +125,4 @@ pub(super) fn overview(value: &Value) -> Vec<(&'static str, String)> {
         ));
     }
     rows
-}
-
-/// kubectl owns Metrics API version discovery and unit/percentage formatting.
-/// Require the named node and all four columns; never synthesize zero usage.
-pub(super) fn metrics(output: &str, name: &str) -> Result<Vec<(&'static str, String)>, String> {
-    let columns = output
-        .lines()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>())
-        .find(|c| c.len() == 5 && c[0] == name)
-        .ok_or_else(|| t!("k8s.metrics_incomplete").to_string())?;
-    for field in [&columns[2], &columns[4]] {
-        if !field
-            .strip_suffix('%')
-            .is_some_and(|v| v.parse::<u64>().is_ok())
-        {
-            return Err(t!("k8s.metrics_incomplete").to_string());
-        }
-    }
-    if columns[1] == "<unknown>" || columns[3] == "<unknown>" {
-        return Err(t!("k8s.metrics_incomplete").to_string());
-    }
-    Ok(vec![
-        ("k8s.cpu_usage", format!("{} · {}", columns[1], columns[2])),
-        (
-            "k8s.memory_usage",
-            format!("{} · {}", columns[3], columns[4]),
-        ),
-    ])
 }

@@ -53,6 +53,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.settings().read(cx).settings().modules.kubernetes {
+            return;
+        }
         if let crate::kubernetes::KubernetesCommand::CopyValue(value) = &action.0 {
             cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
             window.push_notification(Notification::success(t!("k8s.copied")), cx);
@@ -93,8 +96,10 @@ impl Workspace {
         let store = self.store.read(cx);
         let os = store.host(terminal.host).and_then(|host| host.os);
         let shell_only = store.is_external(terminal.host);
+        let kubernetes_enabled = self.settings().read(cx).settings().modules.kubernetes;
         ToolKind::ALL
             .into_iter()
+            .filter(|tool| *tool != ToolKind::Kubernetes || kubernetes_enabled)
             .filter(|tool| tool.works_on(os) && !(shell_only && tool.runs_commands()))
             .collect()
     }

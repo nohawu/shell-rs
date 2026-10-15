@@ -595,6 +595,7 @@ fn shortcuts_groups(panel: &SettingsPanel, _: &App) -> Vec<SettingGroup> {
 /// 应用 → 窗口: what the next launch restores of the main window.
 fn application_groups(panel: &SettingsPanel, _: &App) -> Vec<SettingGroup> {
     let store = &panel.store;
+    let (module_reader, module_writer) = (store.clone(), store.clone());
     let switch = |read: fn(&WindowSettings) -> bool, write: fn(&mut WindowSettings, bool)| {
         let (reader, writer) = (store.clone(), store.clone());
         SettingField::switch(
@@ -628,6 +629,22 @@ fn application_groups(panel: &SettingsPanel, _: &App) -> Vec<SettingGroup> {
                 )
                 .description(t!("settings.window.remember_position_description")),
             ]),
+        SettingGroup::new()
+            .title(t!("settings.modules.title"))
+            .items([SettingItem::new(
+                "Kubernetes",
+                SettingField::switch(
+                    move |cx| module_reader.read(cx).settings().modules.kubernetes,
+                    move |enabled, cx| {
+                        module_writer.update(cx, |store, cx| {
+                            store.update(|settings| settings.modules.kubernetes = enabled, cx)
+                        });
+                    },
+                )
+                .default_value(true),
+            )
+            .description(t!("settings.modules.kubernetes_description"))
+            .keywords(keywords("k8s Kubernetes".into()))]),
     ]
 }
 

@@ -14,10 +14,20 @@ pub enum ResourceKind {
     Job,
     CronJob,
     PersistentVolumeClaim,
+    Node,
+    Namespace,
+    ConfigMap,
+    Secret,
+    ServiceAccount,
+    PersistentVolume,
+    StorageClass,
+    HorizontalPodAutoscaler,
+    PodDisruptionBudget,
+    EndpointSlice,
 }
 
 impl ResourceKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 19] = [
         Self::Pod,
         Self::Deployment,
         Self::StatefulSet,
@@ -28,6 +38,15 @@ impl ResourceKind {
         Self::Job,
         Self::CronJob,
         Self::PersistentVolumeClaim,
+        Self::Namespace,
+        Self::ConfigMap,
+        Self::Secret,
+        Self::ServiceAccount,
+        Self::PersistentVolume,
+        Self::StorageClass,
+        Self::HorizontalPodAutoscaler,
+        Self::PodDisruptionBudget,
+        Self::EndpointSlice,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +61,16 @@ impl ResourceKind {
             Self::Job => "Job",
             Self::CronJob => "CronJob",
             Self::PersistentVolumeClaim => "PVC",
+            Self::Node => "Node",
+            Self::Namespace => "Namespace",
+            Self::ConfigMap => "ConfigMap",
+            Self::Secret => "Secret",
+            Self::ServiceAccount => "ServiceAccount",
+            Self::PersistentVolume => "PV",
+            Self::StorageClass => "StorageClass",
+            Self::HorizontalPodAutoscaler => "HPA",
+            Self::PodDisruptionBudget => "PDB",
+            Self::EndpointSlice => "EndpointSlice",
         }
     }
 
@@ -57,7 +86,37 @@ impl ResourceKind {
             Self::Job => "jobs",
             Self::CronJob => "cronjobs",
             Self::PersistentVolumeClaim => "persistentvolumeclaims",
+            Self::Node => "nodes",
+            Self::Namespace => "namespaces",
+            Self::ConfigMap => "configmaps",
+            Self::Secret => "secrets",
+            Self::ServiceAccount => "serviceaccounts",
+            Self::PersistentVolume => "persistentvolumes",
+            Self::StorageClass => "storageclasses",
+            Self::HorizontalPodAutoscaler => "horizontalpodautoscalers",
+            Self::PodDisruptionBudget => "poddisruptionbudgets",
+            Self::EndpointSlice => "endpointslices",
         }
+    }
+
+    pub(super) fn namespaced(self) -> bool {
+        !matches!(
+            self,
+            Self::Node | Self::Namespace | Self::PersistentVolume | Self::StorageClass
+        )
+    }
+
+    pub(super) fn from_kind(kind: &str) -> Option<Self> {
+        Self::ALL.into_iter().chain([Self::Node]).find(|value| {
+            value.label() == kind
+                || matches!(
+                    (value, kind),
+                    (Self::PersistentVolumeClaim, "PersistentVolumeClaim")
+                        | (Self::PersistentVolume, "PersistentVolume")
+                        | (Self::HorizontalPodAutoscaler, "HorizontalPodAutoscaler")
+                        | (Self::PodDisruptionBudget, "PodDisruptionBudget")
+                )
+        })
     }
 }
 
@@ -68,7 +127,26 @@ pub enum KubernetesCommand {
     Context(String),
     Namespace(Option<String>),
     Kind(ResourceKind),
-    Details { namespace: String, name: String },
+    Section(usize),
+    Details {
+        namespace: String,
+        name: String,
+    },
+    Manage {
+        kind: ResourceKind,
+        namespace: String,
+        name: String,
+        operation: super::mutation::ResourceOperation,
+    },
+    RequestOperation(super::mutation::ResourceOperation),
+    SaveYaml,
+    CancelEdit,
+    ConfirmMutation(String),
+    CancelMutation(String),
+    Changed {
+        terminal: u64,
+        context: String,
+    },
     CloseDetails,
     DetailTab(usize),
     Container(String),
@@ -81,7 +159,16 @@ pub enum KubernetesCommand {
     FollowLogs(bool),
     CopyValue(String),
     RefreshDetails,
+    RefreshMetrics,
+    ToggleProperties,
     RelatedPod(String),
+    RelationNode(String),
+    RelationBack,
+    RefreshRelations,
+    RelationPage {
+        column: usize,
+        page: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +190,15 @@ pub(super) enum Tone {
 }
 
 pub(super) fn status(value: &Value, kind: ResourceKind) -> Option<(String, Tone)> {
+    if value["metadata"]["deletionTimestamp"]
+        .as_str()
+        .is_some_and(|timestamp| !timestamp.is_empty())
+    {
+        return Some((
+            crate::i18n::t!("k8s.terminating").to_string(),
+            Tone::Warning,
+        ));
+    }
     let status = &value["status"];
     let spec = &value["spec"];
     let count = |v: &Value| v.as_u64().unwrap_or(0);
@@ -117,6 +213,22 @@ pub(super) fn status(value: &Value, kind: ResourceKind) -> Option<(String, Tone)
         )
     };
     Some(match kind {
+        ResourceKind::Node => {
+            let ready = status["conditions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|condition| condition["type"] == "Ready");
+            if ready.is_some_and(|condition| condition["status"] == "True") {
+                if spec["unschedulable"] == true {
+                    ("SchedulingDisabled".into(), Tone::Warning)
+                } else {
+                    ("Ready".into(), Tone::Good)
+                }
+            } else {
+                ("NotReady".into(), Tone::Warning)
+            }
+        }
         ResourceKind::Pod => {
             let states = status["containerStatuses"].as_array();
             let reason = ["initContainerStatuses", "containerStatuses"]
@@ -202,13 +314,18 @@ impl Resource {
     }
 
     pub fn matches(&self, query: &str) -> bool {
-        let query = query.to_lowercase();
+        let query = query.trim().to_lowercase();
         [&self.name, &self.namespace, &self.summary, &self.labels]
             .iter()
             .any(|text| text.to_lowercase().contains(&query))
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|(status, _)| status.to_lowercase().contains(&query))
     }
 }
 
+#[cfg(test)]
 pub(super) fn names(output: &str) -> Result<Vec<String>, String> {
     let value: Value = serde_json::from_str(output).map_err(|error| error.to_string())?;
     let items = value["items"]
@@ -229,11 +346,27 @@ pub(super) fn names(output: &str) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+pub(super) fn list_value(output: &str, kind: ResourceKind) -> Result<Value, String> {
+    let mut value: Value = serde_json::from_str(output).map_err(|error| error.to_string())?;
+    if matches!(kind, ResourceKind::Secret | ResourceKind::ConfigMap) && value.is_array() {
+        value = serde_json::json!({"items":value.as_array().unwrap().iter().map(|metadata| serde_json::json!({"metadata":metadata})).collect::<Vec<_>>()});
+    }
+    if !value["items"].is_array() {
+        return Err("Missing Kubernetes items".into());
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
 pub(super) fn resources(output: &str, kind: ResourceKind) -> Result<Vec<Resource>, String> {
-    let value: Value = serde_json::from_str(output).map_err(|error| error.to_string())?;
+    let value = list_value(output, kind)?;
     let items = value["items"]
         .as_array()
         .ok_or("Missing Kubernetes items")?;
+    resource_items(items, kind)
+}
+
+pub(super) fn resource_items(items: &[Value], kind: ResourceKind) -> Result<Vec<Resource>, String> {
     let mut rows = items
         .iter()
         .map(|item| {
@@ -245,6 +378,7 @@ pub(super) fn resources(output: &str, kind: ResourceKind) -> Result<Vec<Resource
             let namespace = item["metadata"]["namespace"]
                 .as_str()
                 .filter(|ns| !ns.is_empty())
+                .or_else(|| (!kind.namespaced()).then_some(""))
                 .ok_or("Missing resource namespace")?
                 .to_owned();
             let labels = item["metadata"]["labels"]
@@ -354,6 +488,8 @@ fn summary(item: &Value, kind: ResourceKind) -> String {
             text(&status["capacity"]["storage"]),
             text(&spec["storageClassName"])
         ),
+        ResourceKind::Node => super::nodes::summary(item),
+        _ => text(&status["phase"]),
     }
 }
 
@@ -404,6 +540,9 @@ pub(super) fn pod_selector(value: &Value, kind: ResourceKind) -> Option<String> 
 }
 
 pub(super) fn overview(value: &Value, kind: ResourceKind) -> Vec<(&'static str, String)> {
+    if kind == ResourceKind::Node {
+        return super::nodes::overview(value);
+    }
     let labels = value["metadata"]["labels"]
         .as_object()
         .map(|labels| {
@@ -457,7 +596,7 @@ pub(super) fn overview(value: &Value, kind: ResourceKind) -> Vec<(&'static str, 
         }
     }
     if let Some(created) = value["metadata"]["creationTimestamp"].as_str() {
-        rows.push(("k8s.created", created.to_owned()));
+        rows.push(("k8s.created", super::format::time(created)));
     }
     if !labels.is_empty() {
         rows.push(("k8s.labels", labels));
@@ -465,5 +604,6 @@ pub(super) fn overview(value: &Value, kind: ResourceKind) -> Vec<(&'static str, 
     if !images.is_empty() {
         rows.push(("k8s.images", images));
     }
+    rows.extend(super::properties::resource(value, kind));
     rows
 }

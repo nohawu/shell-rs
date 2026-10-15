@@ -403,6 +403,14 @@ impl Workspace {
                 this.sync_cli_server(cx);
                 this.sync_updater(cx);
                 this.sync_analytics(window, cx);
+                if !settings.read(cx).settings().modules.kubernetes {
+                    if this.tools.read(cx).tool() == crate::app::ToolKind::Kubernetes {
+                        this.tool_sidebar_wanted = false;
+                    }
+                    this.tools
+                        .update(cx, |tools, cx| tools.disable_kubernetes(cx));
+                }
+                this.sync_tool_sidebar(window, cx);
             }),
             cx.subscribe_in(
                 &updater,

@@ -166,6 +166,7 @@ mod tests {
         let written = store.update_unnotified(|settings| {
             settings.appearance = Appearance::Dark;
             settings.language = InterfaceLanguage::English;
+            settings.modules.kubernetes = false;
         });
         assert!(matches!(written, Some(Ok(()))));
 
@@ -173,6 +174,15 @@ mod tests {
         assert!(problem.is_none());
         assert_eq!(reloaded.settings().appearance, Appearance::Dark);
         assert_eq!(reloaded.settings().language, InterfaceLanguage::English);
+        assert!(!reloaded.settings().modules.kubernetes);
+    }
+
+    #[test]
+    fn old_settings_files_keep_kubernetes_enabled() {
+        for json in [r#"{}"#, r#"{"modules":{}}"#] {
+            let settings: AppSettings = serde_json::from_str(json).unwrap();
+            assert!(settings.modules.kubernetes);
+        }
     }
 
     #[test]

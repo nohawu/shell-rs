@@ -57,6 +57,7 @@ icon_assets!(
         RotateCcw,
         Network,
         Boxes,
+        ShipWheel,
         RadioTower,
         ArrowDownLeft,
         ArrowUpRight,

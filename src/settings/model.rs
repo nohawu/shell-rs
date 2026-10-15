@@ -42,8 +42,22 @@ pub struct AppSettings {
     pub terminal_highlight: TerminalHighlightSettings,
     /// 应用 → 窗口.
     pub window: WindowSettings,
+    /// 应用 → 功能模块. Changes take effect immediately.
+    pub modules: ModuleSettings,
     /// 键盘快捷键: what the user changed of them.
     pub shortcuts: ShortcutOverrides,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModuleSettings {
+    pub kubernetes: bool,
+}
+
+impl Default for ModuleSettings {
+    fn default() -> Self {
+        Self { kubernetes: true }
+    }
 }
 
 /// 应用 → 窗口: what the next launch restores of the main window. Both on
