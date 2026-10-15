@@ -1294,19 +1294,7 @@ impl KubernetesDetails {
                                 .cloned()
                                 .map(|value| (ResourceKind::Pod, value)),
                         );
-                        let graph = relations::build(&root, &values);
-                        let items = items
-                            .into_iter()
-                            .filter(|value| {
-                                let key = format!(
-                                    "k8s-resource:pods:{}/{}",
-                                    value["metadata"]["namespace"].as_str().unwrap_or(""),
-                                    value["metadata"]["name"].as_str().unwrap_or("")
-                                );
-                                graph.nodes.contains_key(&key)
-                            })
-                            .collect::<Vec<_>>();
-                        model::resource_items(&items, ResourceKind::Pod)
+                        relations::related_pods(&root, &values)
                     })
                 })
                 .await;

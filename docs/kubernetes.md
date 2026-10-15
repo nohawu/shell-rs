@@ -54,7 +54,7 @@ Kubernetes 面板在首次选择时才创建。未使用时不创建其输入控
 
 右上角“关闭”、Esc 或点击窗口外侧均可关闭详情，随后焦点回到资源列表。查询尚未完成时也可以关闭；迟到的回复不会重新打开窗口。
 
-Deployment、StatefulSet、DaemonSet、ReplicaSet、Job 和带选择器的 Service 会按 `spec.selector` 查询同命名空间内的候选 Pod，支持 `matchLabels` 和 `matchExpressions`。工作负载再按 ownerReferences 和 UID 验证控制链，Deployment 先读取实际归属的 ReplicaSet，避免把标签相同的其他工作负载列为关联 Pod。点击关联 Pod 后，详情页切换到该 Pod，再进入日志页。没有直接 Pod 选择器的资源（例如 CronJob 或 ExternalName Service）可回到 Pod 列表按名称或标签筛选。
+Deployment、StatefulSet、DaemonSet、ReplicaSet、Job 和带选择器的 Service 会按 `spec.selector` 查询同命名空间内的候选 Pod，支持 `matchLabels` 和 `matchExpressions`。工作负载再按 ownerReferences 和 UID 验证控制链，Deployment 先读取实际归属的 ReplicaSet，避免把标签相同的其他工作负载列为关联 Pod。概览中的关联 Pod 列表不受关系图 160 个节点的显示上限影响。点击关联 Pod 后，详情页切换到该 Pod，再进入日志页。没有直接 Pod 选择器的资源（例如 CronJob 或 ExternalName Service）可回到 Pod 列表按名称或标签筛选。
 
 ## 资源关系图
 

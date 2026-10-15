@@ -416,6 +416,73 @@ pub(super) fn build(root: &Resource, values: &[(ResourceKind, Value)]) -> Graph 
     graph.focused(&root.key())
 }
 
+/// The overview list is complete; the relationship diagram's node budget
+/// must never decide which Pods belong to a workload.
+pub(super) fn related_pods(
+    root: &Resource,
+    values: &[(ResourceKind, Value)],
+) -> Result<Vec<Resource>, String> {
+    let Some((_, snapshot)) = values.iter().find(|(kind, value)| {
+        *kind == root.kind
+            && value["metadata"]["name"].as_str() == Some(&root.name)
+            && value["metadata"]["namespace"].as_str().unwrap_or("") == root.namespace
+    }) else {
+        return Ok(Vec::new());
+    };
+    let replica_sets = values
+        .iter()
+        .filter(|(kind, value)| {
+            root.kind == ResourceKind::Deployment
+                && *kind == ResourceKind::ReplicaSet
+                && owned_by(value, root.kind, snapshot)
+        })
+        .filter_map(|(_, value)| Some((value["metadata"]["name"].as_str()?, value)))
+        .collect::<BTreeMap<_, _>>();
+    let items = values
+        .iter()
+        .filter(|(kind, value)| {
+            if *kind != ResourceKind::Pod
+                || value["metadata"]["namespace"].as_str() != Some(&root.namespace)
+            {
+                return false;
+            }
+            match root.kind {
+                ResourceKind::Service | ResourceKind::PodDisruptionBudget => selector_matches(
+                    &snapshot["spec"]["selector"],
+                    &value["metadata"]["labels"],
+                    root.kind == ResourceKind::PodDisruptionBudget,
+                ),
+                ResourceKind::Deployment => value["metadata"]["ownerReferences"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|owner| replica_sets.get(owner["name"].as_str()?))
+                    .any(|owner| owned_by(value, ResourceKind::ReplicaSet, owner)),
+                _ => owned_by(value, root.kind, snapshot),
+            }
+        })
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    model::resource_items(&items, ResourceKind::Pod)
+}
+
+fn owned_by(value: &Value, kind: ResourceKind, owner: &Value) -> bool {
+    value["metadata"]["namespace"] == owner["metadata"]["namespace"]
+        && value["metadata"]["ownerReferences"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|reference| {
+                reference_kind(reference) == Some(kind)
+                    && reference["name"] == owner["metadata"]["name"]
+                    && reference["uid"].as_str().is_none_or(|uid| {
+                        owner["metadata"]["uid"]
+                            .as_str()
+                            .is_none_or(|actual| actual == uid)
+                    })
+            })
+}
+
 /// Kind names alone do not identify API types (a CRD may use the same Kind).
 fn reference_kind(value: &Value) -> Option<ResourceKind> {
     let kind = value["kind"].as_str().and_then(ResourceKind::from_kind)?;

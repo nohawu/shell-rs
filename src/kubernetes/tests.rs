@@ -616,6 +616,45 @@ fn relation_graph_is_bounded_without_recursing_on_owner_cycles() {
 }
 
 #[test]
+fn related_pod_lists_are_complete_beyond_the_graph_limit() {
+    use super::relations;
+    let root = Resource {
+        kind: ResourceKind::Deployment,
+        name: "web".into(),
+        ..pod()
+    };
+    let deployment = object("Deployment", "web", "production");
+    let mut replica_set = object("ReplicaSet", "web-rs", "production");
+    replica_set["metadata"]["ownerReferences"] = json!([{
+        "apiVersion":"apps/v1", "kind":"Deployment", "name":"web",
+        "uid":deployment["metadata"]["uid"], "controller":true
+    }]);
+    let mut values = vec![
+        (ResourceKind::Deployment, deployment),
+        (ResourceKind::ReplicaSet, replica_set.clone()),
+    ];
+    for ix in 0..200 {
+        let mut value = object("Pod", &format!("web-{ix:03}"), "production");
+        value["metadata"]["ownerReferences"] = json!([{
+            "apiVersion":"apps/v1", "kind":"ReplicaSet", "name":"web-rs",
+            "uid":replica_set["metadata"]["uid"], "controller":true
+        }]);
+        value["spec"] = json!({"containers":[{"name":"app"},{"name":"sidecar"}]});
+        values.push((ResourceKind::Pod, value));
+    }
+    let mut unrelated = values.last().unwrap().1.clone();
+    unrelated["metadata"]["name"] = json!("unrelated");
+    unrelated["metadata"]["ownerReferences"][0]["uid"] = json!("recreated-rs");
+    values.push((ResourceKind::Pod, unrelated));
+    let graph = relations::build(&root, &values);
+    assert!(graph.clipped);
+    let pods = relations::related_pods(&root, &values).unwrap();
+    assert_eq!(pods.len(), 200);
+    assert!(pods.iter().any(|pod| pod.name == "web-199"));
+    assert!(!pods.iter().any(|pod| pod.name == "unrelated"));
+}
+
+#[test]
 fn cluster_queries_omit_namespace_and_secret_queries_only_request_metadata() {
     let decoded = script(&commands::list(
         "prod",
