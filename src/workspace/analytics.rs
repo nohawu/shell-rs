@@ -117,12 +117,14 @@ impl Workspace {
         self.count(match tool {
             ToolKind::Snippets => Counter::ToolSnippets,
             ToolKind::History => Counter::ToolHistory,
+            ToolKind::Files => Counter::ToolFiles,
             ToolKind::Docker => Counter::ToolDocker,
             ToolKind::Kubernetes => Counter::ToolKubernetes,
             ToolKind::Services => Counter::ToolServices,
             ToolKind::Processes => Counter::ToolProcesses,
             ToolKind::Connections => Counter::ToolNetstat,
             ToolKind::Monitor => Counter::ToolMonitor,
+            ToolKind::Gpu => Counter::ToolGpu,
         });
     }
 
@@ -191,6 +193,7 @@ impl Workspace {
             auto_update: settings.update.automatic,
             update_channel: settings.update.channel.key(),
             custom_shortcuts: settings.shortcuts != ShortcutOverrides::default(),
+            file_icons: settings.file_icon_style.key(),
             hosts: store.hosts().len(),
             credentials: store.credentials().len(),
             forwards: store.forwards().len(),

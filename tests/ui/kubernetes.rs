@@ -1245,13 +1245,16 @@ async fn kubernetes_searches_namespace_and_context_by_value(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
-async fn kubernetes_module_switch_hides_stops_and_reopens_the_tool(cx: &mut TestAppContext) {
+async fn kubernetes_sidebar_setting_hides_stops_and_reopens_the_tool(cx: &mut TestAppContext) {
     use shellrs::app::{OpenSettings, ToggleTool, ToolKind};
     let factory = Arc::new(FakeTerminalFactory::answering(&[
         CONTEXTS, NAMESPACES, PODS, CONTEXTS, NAMESPACES, PODS, POD_DETAIL, LOGS, LOGS,
     ]));
     let (handle, workspace) =
         open_workspace_with_remote_factory(cx, HostStore::seed(), factory.clone());
+    // Match the settings sidebar's integration fixture so its virtualized
+    // category and both tool rows are rendered together.
+    cx.simulate_window_resize(handle.into(), size(px(1280.), px(1400.)));
     in_frame(cx, handle, |window, cx| {
         window.click(("terminal-tab", INITIAL_WEB_TERMINAL), cx)
     });
@@ -1261,20 +1264,15 @@ async fn kubernetes_module_switch_hides_stops_and_reopens_the_tool(cx: &mut Test
         window.dispatch_action(Box::new(OpenSettings), cx)
     });
     in_frame(cx, handle, |window, cx| {
-        window.within("settings").click("0-5", cx)
+        window.within("settings").click("0-1", cx)
     });
     in_frame(cx, handle, |window, cx| {
-        let switch = window
-            .within("settings")
-            .within("group-1")
-            .within("item-0")
-            .find("check");
-        assert_eq!(switch.checked(), Some(true));
+        window.within("settings").click("0-1-2", cx)
+    });
+    in_frame(cx, handle, |window, cx| {
         window
-            .within("settings")
-            .within("group-1")
-            .within("item-0")
-            .click("check", cx);
+            .within("sidebar-tools-shown")
+            .click("sidebar-tool-kubernetes", cx);
     });
     cx.update(|cx| {
         assert!(
@@ -1283,8 +1281,8 @@ async fn kubernetes_module_switch_hides_stops_and_reopens_the_tool(cx: &mut Test
                 .settings()
                 .read(cx)
                 .settings()
-                .modules
-                .kubernetes
+                .sidebar_tools
+                .shows(ToolKind::Kubernetes)
         )
     });
     in_frame(cx, handle, |window, cx| {
@@ -1307,11 +1305,15 @@ async fn kubernetes_module_switch_hides_stops_and_reopens_the_tool(cx: &mut Test
         window.dispatch_action(Box::new(OpenSettings), cx)
     });
     in_frame(cx, handle, |window, cx| {
+        window.within("settings").click("0-1", cx)
+    });
+    in_frame(cx, handle, |window, cx| {
+        window.within("settings").click("0-1-2", cx)
+    });
+    in_frame(cx, handle, |window, cx| {
         window
-            .within("settings")
-            .within("group-1")
-            .within("item-0")
-            .click("check", cx)
+            .within("sidebar-tools-hidden")
+            .click("sidebar-tool-kubernetes", cx)
     });
     in_frame(cx, handle, |window, cx| {
         window.click(("terminal-tab", INITIAL_WEB_TERMINAL), cx)
@@ -1335,7 +1337,10 @@ async fn kubernetes_module_switch_hides_stops_and_reopens_the_tool(cx: &mut Test
     cx.update(|cx| {
         let settings = workspace.read(cx).settings().clone();
         settings.update(cx, |store, cx| {
-            store.update(|settings| settings.modules.kubernetes = false, cx)
+            store.update(
+                |settings| settings.sidebar_tools.set(ToolKind::Kubernetes, false),
+                cx,
+            )
         });
     });
     cx.run_until_parked();

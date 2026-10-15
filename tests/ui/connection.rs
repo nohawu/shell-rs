@@ -7,6 +7,7 @@ use crate::support::*;
 enum PromptBehavior {
     Authentication,
     UnknownHost,
+    HostKeyChanged,
 }
 
 struct PromptTerminalFactory {
@@ -61,6 +62,13 @@ impl TerminalTransport for PromptTerminalTransport {
                 "ssh-ed25519",
                 "SHA256:test-fingerprint",
             ),
+            PromptBehavior::HostKeyChanged => ConnectionPromptKind::host_key_changed(
+                "example.test",
+                22,
+                "ssh-ed25519",
+                vec!["SHA256:old-fingerprint".into()],
+                "SHA256:new-fingerprint",
+            ),
         };
         events.send_blocking(TerminalTransportEvent::Prompt(ConnectionPrompt::new(
             request_id, kind,
@@ -72,7 +80,10 @@ impl TerminalTransport for PromptTerminalTransport {
                     reply,
                 } if reply_id == request_id => match reply {
                     ConnectionPromptReply::TrustAndSave
-                        if matches!(self.behavior, PromptBehavior::UnknownHost) =>
+                        if matches!(
+                            self.behavior,
+                            PromptBehavior::UnknownHost | PromptBehavior::HostKeyChanged
+                        ) =>
                     {
                         self.accepted.fetch_add(1, Ordering::SeqCst);
                         break;
@@ -142,6 +153,13 @@ async fn authentication_prompt_is_masked_and_drives_connected_state(cx: &mut Tes
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
+        assert_eq!(
+            window
+                .within(("terminal-tab", 1u64))
+                .find("connection-status")
+                .label(),
+            Some("连接中")
+        );
         let password = window.find(("ssh-auth-answer", 0usize));
         assert_eq!(
             password.value(),
@@ -156,6 +174,10 @@ async fn authentication_prompt_is_masked_and_drives_connected_state(cx: &mut Tes
     cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
         window.render_frame(cx);
         window.find("status-connection").label() == Some("已连接 prompt-host")
+            && window
+                .within(("terminal-tab", 1u64))
+                .try_find("connection-status")
+                .is_none()
     })
     .await;
 
@@ -169,6 +191,41 @@ async fn authentication_prompt_is_masked_and_drives_connected_state(cx: &mut Tes
             .state
             .is_connected()
     }));
+}
+
+#[gpui_kit::test]
+async fn a_changed_host_key_is_updated_from_its_question(cx: &mut TestAppContext) {
+    let (store, id) = one_host_store(AuthKind::Password);
+    let factory = Arc::new(PromptTerminalFactory::new(PromptBehavior::HostKeyChanged));
+    let (handle, _) = open_workspace_with_remote_factory(cx, store, factory.clone());
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .within("host-tree")
+            .double_click(("host-row", id.0), cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        window.try_find("ok").is_some()
+    })
+    .await;
+    // Two ways out: keep the saved key, or update it and go on.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("ok").label(), Some("更新并连接"));
+        assert!(window.try_find("cancel").is_some());
+        window.click("ok", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        window.find("status-connection").label() == Some("已连接 prompt-host")
+    })
+    .await;
+    assert_eq!(factory.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.canceled.load(Ordering::SeqCst), 0);
 }
 
 #[gpui_kit::test]
@@ -213,6 +270,11 @@ async fn canceling_unknown_host_prompt_keeps_host_disconnected(cx: &mut TestAppC
     cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
         window.render_frame(cx);
         window.find("status-connection").label() == Some("未连接 prompt-host")
+            && window
+                .within(("terminal-tab", 1u64))
+                .find("connection-status")
+                .label()
+                == Some("未连接")
             && factory.canceled.load(Ordering::SeqCst) == 1
     })
     .await;
@@ -448,6 +510,15 @@ async fn disconnecting_one_tab_leaves_the_other_tabs_of_its_host(cx: &mut TestAp
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
+        // Connected tabs carry no dot.
+        for id in [INITIAL_WEB_TERMINAL, second.0] {
+            assert!(
+                window
+                    .within(("terminal-tab", id))
+                    .try_find("connection-status")
+                    .is_none()
+            );
+        }
         window.dispatch_action(Box::new(DisconnectTerminal(second)), cx);
     })
     .unwrap();
@@ -477,11 +548,70 @@ async fn disconnecting_one_tab_leaves_the_other_tabs_of_its_host(cx: &mut TestAp
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.dispatch_action(Box::new(ReconnectTerminal(second)), cx);
+        assert!(
+            window
+                .within(("terminal-tab", INITIAL_WEB_TERMINAL))
+                .try_find("connection-status")
+                .is_none()
+        );
+        let tab = window.within(("terminal-tab", second.0));
+        assert_eq!(tab.find("connection-status").label(), Some("未连接"));
+        let mark = tab.find(("terminal-tab-os", second.0)).bounds();
+        let dot = tab.find("connection-status").bounds();
+        let title = window.find(("terminal-tab", second.0)).bounds();
+        let close = window.find(("close-terminal", second.0)).bounds();
+        assert_eq!(mark.center().y, close.center().y);
+        let centers = dot.center() - mark.center();
+        let distance = (f32::from(centers.x).powi(2) + f32::from(centers.y).powi(2)).sqrt();
+        assert!(distance > f32::from(mark.size.width + dot.size.width) / 2.);
+        assert!(dot.right() < close.left());
+        assert_eq!(mark.center().y, title.center().y);
+        window.click(("terminal", second.0), cx);
+        window.press("enter", cx);
     })
     .unwrap();
-    cx.wait_for(handle.into(), Duration::from_secs(2), |_, cx| {
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
         remote_lifecycle(&workspace, second, cx) == TerminalLifecycle::Running
+            && window
+                .within(("terminal-tab", second.0))
+                .try_find("connection-status")
+                .is_none()
+    })
+    .await;
+}
+
+#[gpui_kit::test]
+async fn failed_connection_tab_reports_disconnected_then_recovers(cx: &mut TestAppContext) {
+    let (store, host_id) = one_host_store(AuthKind::Password);
+    let factory = Arc::new(FakeTerminalFactory::fail_first());
+    let (handle, workspace) = open_workspace_with_remote_factory(cx, store, factory);
+    let terminal_id = RemoteTerminalId(1);
+    in_frame(cx, handle, |window, cx| {
+        window.dispatch_action(Box::new(ConnectHost(host_id)), cx);
+    });
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        matches!(
+            remote_lifecycle(&workspace, terminal_id, cx),
+            TerminalLifecycle::Failed(_)
+        ) && window
+            .within(("terminal-tab", terminal_id.0))
+            .find("connection-status")
+            .label()
+            == Some("未连接")
+    })
+    .await;
+    in_frame(cx, handle, |window, cx| {
+        window.dispatch_action(Box::new(ReconnectTerminal(terminal_id)), cx);
+    });
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        remote_lifecycle(&workspace, terminal_id, cx) == TerminalLifecycle::Running
+            && window
+                .within(("terminal-tab", terminal_id.0))
+                .try_find("connection-status")
+                .is_none()
     })
     .await;
 }
@@ -512,6 +642,55 @@ async fn connecting_marks_the_host_with_the_host_operating_system(cx: &mut TestA
         let store = workspace.read(cx).store().read(cx);
         assert_eq!(store.host(id).unwrap().os, Some(HostOs::Fedora));
     });
+}
+
+#[gpui_kit::test]
+async fn a_windows_host_updates_the_tree_tab_and_recent_marks(cx: &mut TestAppContext) {
+    let (store, id) = one_host_store(AuthKind::Password);
+    let factory = Arc::new(FakeTerminalFactory::reports_os(HostOs::Windows));
+    let (handle, workspace) = open_workspace_with_remote_factory(cx, store, factory);
+    let terminal = 1_u64;
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(("host-os", id.0)).label(), Some("未探测到系统"));
+        window
+            .within("host-tree")
+            .double_click(("host-row", id.0), cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        window.find(("host-os", id.0)).label() == Some("Windows")
+            && window
+                .try_find(("terminal-tab-os", terminal))
+                .is_some_and(|mark| mark.label() == Some("Windows"))
+    })
+    .await;
+    cx.update(|cx| {
+        assert_eq!(
+            workspace.read(cx).store().read(cx).host(id).unwrap().os,
+            Some(HostOs::Windows)
+        );
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window
+                .within(("terminal-tab", terminal))
+                .try_find("connection-status")
+                .is_none()
+        );
+        window.click(("close-terminal", terminal), cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        window
+            .try_find(("recent-host-os", id.0))
+            .is_some_and(|mark| mark.label() == Some("Windows"))
+    })
+    .await;
 }
 
 #[gpui_kit::test]
@@ -630,7 +809,7 @@ async fn a_link_opens_a_terminal_to_a_host_that_goes_with_its_last_tab(cx: &mut 
         // The bastion host gets the terminal alone: of the tools, only the
         // snippets, which type into it.
         assert!(window.try_find("tool-snippets").is_some());
-        for tool in ["tool-history", "tool-docker", "tool-monitor"] {
+        for tool in ["tool-history", "tool-files", "tool-docker", "tool-monitor"] {
             assert!(window.try_find(tool).is_none(), "{tool}");
         }
     })
@@ -801,10 +980,10 @@ async fn a_temporary_connection_has_every_feature_and_saves_nothing(cx: &mut Tes
         window.click("host-address", cx);
         window.input("10.0.0.9", cx);
         window.click("host-port", cx);
-        window.press("cmd-a", cx);
+        window.press("secondary-a", cx);
         window.input("2222", cx);
         window.click("host-user", cx);
-        window.press("cmd-a", cx);
+        window.press("secondary-a", cx);
         window.input("deploy", cx);
         window.click("host-password", cx);
         window.input("p@ss", cx);
@@ -846,6 +1025,7 @@ async fn a_temporary_connection_has_every_feature_and_saves_nothing(cx: &mut Tes
         for tool in [
             "tool-snippets",
             "tool-history",
+            "tool-files",
             "tool-docker",
             "tool-monitor",
         ] {
@@ -911,4 +1091,317 @@ async fn a_link_that_cannot_be_read_says_why_and_opens_nothing(cx: &mut TestAppC
     workspace.read_with(cx, |workspace, cx| {
         assert!(workspace.store().read(cx).host(LINK_HOST).is_none());
     });
+}
+
+/// Initial errors and later exits both retain their tab and retry through
+/// that tab's regular reconnect action, without leaking Enter to the shell.
+async fn enter_reconnects_stopped_remote(
+    cx: &mut TestAppContext,
+    factory: Arc<FakeTerminalFactory>,
+) {
+    let (store, host) = one_host_store(AuthKind::Password);
+    let (handle, workspace) = open_workspace_with_remote_factory(cx, store, factory.clone());
+    let terminal = RemoteTerminalId(1);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .within("host-tree")
+            .double_click(("host-row", host.0), cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |_, cx| {
+        matches!(
+            remote_lifecycle(&workspace, terminal, cx),
+            TerminalLifecycle::Failed(_) | TerminalLifecycle::Exited { .. }
+        )
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let screen = workspace
+            .read(cx)
+            .remote_terminal(terminal)
+            .unwrap()
+            .read(cx)
+            .terminal()
+            .read(cx)
+            .screen_text(cx);
+        assert!(screen.contains("按 Enter 重新连接"), "{screen}");
+        window.click(("terminal", terminal.0), cx);
+        for key in ["shift-enter", "ctrl-enter", "alt-enter"] {
+            window.press(key, cx);
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string("\n".into()));
+        window.dispatch_action(Box::new(shellrs::app::PasteTerminal), cx);
+        window.dispatch_action(Box::new(FindInTerminal), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("terminal-find", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        factory.starts(),
+        1,
+        "modifiers, paste and find must not reconnect"
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("terminal", terminal.0), cx);
+        window.press("enter", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |_, cx| {
+        remote_lifecycle(&workspace, terminal, cx) == TerminalLifecycle::Running
+    })
+    .await;
+    assert_eq!(factory.starts(), 2);
+    assert_eq!(
+        factory.written_text(),
+        "",
+        "reconnect Enter must not reach the new shell"
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(("terminal", terminal.0)).focused(), Some(true));
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |_, _| {
+        factory.written_text() == "\r"
+    })
+    .await;
+    assert_eq!(factory.starts(), 2, "connected Enter is ordinary input");
+}
+
+#[gpui_kit::test]
+async fn enter_reconnects_failed_remote(cx: &mut TestAppContext) {
+    enter_reconnects_stopped_remote(cx, Arc::new(FakeTerminalFactory::fail_first())).await;
+}
+
+#[gpui_kit::test]
+async fn enter_reconnects_exited_remote(cx: &mut TestAppContext) {
+    enter_reconnects_stopped_remote(cx, Arc::new(FakeTerminalFactory::exit_first())).await;
+}
+
+#[gpui_kit::test]
+async fn enter_retries_canceled_authentication_in_the_same_tab(cx: &mut TestAppContext) {
+    let (store, host) = one_host_store(AuthKind::Password);
+    let factory = Arc::new(PromptTerminalFactory::new(PromptBehavior::Authentication));
+    let (handle, workspace) = open_workspace_with_remote_factory(cx, store, factory.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .within("host-tree")
+            .double_click(("host-row", host.0), cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        window.try_find("ssh-auth-submit").is_some()
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        matches!(
+            remote_lifecycle(&workspace, RemoteTerminalId(1), cx),
+            TerminalLifecycle::Exited { .. }
+        ) && window.try_find("ssh-auth-submit").is_none()
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("terminal", 1_u64), cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        window.try_find("ssh-auth-submit").is_some()
+    })
+    .await;
+    cx.update(|cx| {
+        assert_eq!(
+            remote_lifecycle(&workspace, RemoteTerminalId(1), cx),
+            TerminalLifecycle::Starting
+        );
+        assert!(
+            workspace
+                .read(cx)
+                .remote_terminal(RemoteTerminalId(2))
+                .is_none()
+        );
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+/// Exercise the production title in the same TabBar used by the dock, with
+/// and without its badge. Geometry must be invariant under state/selection.
+struct TabStatusLayout {
+    state: ConnectionState,
+    selected: usize,
+    rem: f32,
+}
+
+impl gpui_kit::Render for TabStatusLayout {
+    fn render(
+        &mut self,
+        window: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::component::{
+            Sizable as _,
+            tab::{Tab, TabBar},
+        };
+        use gpui_kit::{InteractiveElement as _, ParentElement as _};
+        use shellrs::shared::{ClosableTabTitle, HostMark};
+        window.set_rem_size(px(self.rem));
+        let title = |id| {
+            ClosableTabTitle::new(
+                ("layout-title", id),
+                HostMark::new(("layout-mark", id), "host", Some(HostOs::Ubuntu)).small(),
+                "host",
+            )
+            .closable(("layout-close", id), Box::new(shellrs::app::CloseActiveTab))
+        };
+        TabBar::new("layout-tabs")
+            .selected_index(self.selected)
+            .child(
+                Tab::new()
+                    .debug_selector(|| "plain-tab".into())
+                    .child(title(0u64)),
+            )
+            .child(
+                Tab::new()
+                    .debug_selector(|| "status-tab".into())
+                    .child(title(1u64).connection_state(self.state)),
+            )
+    }
+}
+
+#[gpui_kit::test]
+fn connection_badge_preserves_icon_alignment_and_fits_the_tab(cx: &mut TestAppContext) {
+    init_app(cx);
+    let (view, cx) = cx.add_window_view(|_, _| TabStatusLayout {
+        state: ConnectionState::Connected,
+        selected: 0,
+        rem: 16.,
+    });
+    // The headless platform fixes device scaling at 2x; vary rem sizing too.
+    for rem in [12., 14., 16., 18.] {
+        for selected in [0, 1] {
+            for state in [
+                ConnectionState::Connected,
+                ConnectionState::Connecting,
+                ConnectionState::Disconnected,
+            ] {
+                view.update(cx, |view, cx| {
+                    view.rem = rem;
+                    view.selected = selected;
+                    view.state = state;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| window.render_frame(cx));
+                let clipped_tab = cx.debug_bounds("status-tab").unwrap();
+                cx.update(|window, _| {
+                    let plain = window.find(("layout-title", 0u64)).bounds();
+                    let title = window.find(("layout-title", 1u64)).bounds();
+                    let plain_mark = window.find(("layout-mark", 0u64)).bounds();
+                    let mark = window.find(("layout-mark", 1u64)).bounds();
+                    let close = window.find(("layout-close", 1u64)).bounds();
+                    assert_eq!(title.size, plain.size, "badge must not affect title layout");
+                    assert_eq!(mark.size, plain_mark.size, "badge must not shrink the icon");
+                    assert_eq!(
+                        mark.center() - title.origin,
+                        plain_mark.center() - plain.origin
+                    );
+                    assert_eq!(mark.center().y, close.center().y);
+                    assert_eq!(mark.center().y, title.center().y);
+                    // A connection that is up is the normal state: no dot.
+                    let dot = window
+                        .within(("layout-title", 1u64))
+                        .try_find("connection-status");
+                    assert_eq!(dot.is_none(), state == ConnectionState::Connected);
+                    let Some(dot) = dot else {
+                        return;
+                    };
+                    let dot = dot.bounds();
+                    let centers = dot.center() - mark.center();
+                    let distance =
+                        (f32::from(centers.x).powi(2) + f32::from(centers.y).powi(2)).sqrt();
+                    assert!(
+                        distance > f32::from(mark.size.width + dot.size.width) / 2.,
+                        "circles must not overlap"
+                    );
+                    assert!(
+                        dot.bottom() <= clipped_tab.bottom() - px(1.),
+                        "badge must fit the dock tab"
+                    );
+                    assert!(
+                        dot.right() < mark.right() + px(rem / 4.),
+                        "badge must stop before the label"
+                    );
+                    assert!(dot.right() < close.left());
+                });
+            }
+        }
+    }
+}
+
+#[gpui_kit::test]
+async fn reconnect_toolbar_works_without_window_focus(cx: &mut TestAppContext) {
+    let (store, host) = one_host_store(AuthKind::Password);
+    let factory = Arc::new(FakeTerminalFactory::default());
+    let (handle, workspace) = open_workspace_with_remote_factory(cx, store, factory.clone());
+    in_frame(cx, handle, |window, cx| {
+        window
+            .within("host-tree")
+            .double_click(("host-row", host.0), cx);
+    });
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        workspace
+            .read(cx)
+            .remote_terminal(RemoteTerminalId(1))
+            .unwrap()
+            .read(cx)
+            .lifecycle(cx)
+            == TerminalLifecycle::Running
+    })
+    .await;
+    let starts = factory.starts();
+    in_frame(cx, handle, |window, cx| window.blur(cx));
+    in_frame(cx, handle, |window, cx| {
+        assert!(window.focused(cx).is_none());
+        window.click(("reconnect", 1u64), cx);
+    });
+    cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+        window.render_frame(cx);
+        factory.starts() > starts
+            && workspace
+                .read(cx)
+                .remote_terminal(RemoteTerminalId(1))
+                .unwrap()
+                .read(cx)
+                .lifecycle(cx)
+                == TerminalLifecycle::Running
+    })
+    .await;
+    assert_eq!(factory.starts(), starts + 1);
 }

@@ -166,7 +166,9 @@ mod tests {
         let written = store.update_unnotified(|settings| {
             settings.appearance = Appearance::Dark;
             settings.language = InterfaceLanguage::English;
-            settings.modules.kubernetes = false;
+            settings
+                .sidebar_tools
+                .set(crate::app::ToolKind::Kubernetes, false);
         });
         assert!(matches!(written, Some(Ok(()))));
 
@@ -174,14 +176,23 @@ mod tests {
         assert!(problem.is_none());
         assert_eq!(reloaded.settings().appearance, Appearance::Dark);
         assert_eq!(reloaded.settings().language, InterfaceLanguage::English);
-        assert!(!reloaded.settings().modules.kubernetes);
+        assert!(
+            !reloaded
+                .settings()
+                .sidebar_tools
+                .shows(crate::app::ToolKind::Kubernetes)
+        );
     }
 
     #[test]
     fn old_settings_files_keep_kubernetes_enabled() {
-        for json in [r#"{}"#, r#"{"modules":{}}"#] {
+        for json in [r#"{}"#, r#"{"sidebar_tools":{}}"#] {
             let settings: AppSettings = serde_json::from_str(json).unwrap();
-            assert!(settings.modules.kubernetes);
+            assert!(
+                settings
+                    .sidebar_tools
+                    .shows(crate::app::ToolKind::Kubernetes)
+            );
         }
     }
 

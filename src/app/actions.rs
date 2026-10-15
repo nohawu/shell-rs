@@ -1,8 +1,11 @@
 //! Every user command, so toolbar buttons, menus and key bindings dispatch
 //! the same action and cannot disagree.
 
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::*;
 
+use super::{CatalogIcon, DOCKER_ICON};
+use crate::i18n::t;
 use crate::{
     cli::AgentKind,
     docker::{ContainerCommand, ContainerSubject, DockerObject},
@@ -36,6 +39,8 @@ gpui_kit::actions!(
         CopyTerminal,
         /// Paste the clipboard into the active terminal.
         PasteTerminal,
+        /// Select all of the active terminal's text, the scrollback with it.
+        SelectAllTerminal,
         /// Open the active terminal's find bar, or select its query again.
         FindInTerminal,
         /// Focus the next match down (newer output) in the active terminal.
@@ -44,6 +49,10 @@ gpui_kit::actions!(
         FindPreviousInTerminal,
         /// Close the active terminal's find bar and its highlights.
         DismissTerminalFind,
+        /// Close the 查找文件 window it is pressed in.
+        CloseFindFiles,
+        /// 复制结果 in the 查找文件 window: every result's path.
+        CopyFindResults,
         /// Clear the active terminal's screen and scrollback, keeping the
         /// prompt line.
         ClearTerminal,
@@ -61,6 +70,11 @@ gpui_kit::actions!(
         RefreshDocker,
         /// Read the bash history of the SSH terminal's host again.
         RefreshHistory,
+        /// Read the GPUs and NPUs of the SSH terminal's host again, and go
+        /// on reading them after a failure stopped it.
+        RefreshGpu,
+        /// 全部展开 in GPU/NPU, or 全部收起 when every device is unfolded.
+        ToggleAllGpuDevices,
         /// Open the new-snippet dialog, for a snippet of no category.
         NewSnippet,
         /// Open the new-category dialog of 命令片段.
@@ -246,8 +260,16 @@ id_actions! {
     ToggleTool(ToolKind);
     /// Browse Kubernetes resources and logs on the SSH host.
     KubernetesAction(KubernetesCommand);
+    /// 目录跟随 in a terminal's 文件: follow the terminal's folder, or stop.
+    ToggleDirectoryFollow(ExplorerId);
+    /// 自动配置 in 「启用目录跟随？」: set the terminal's shell up to report
+    /// its folder.
+    InstallDirectoryFollow(RemoteTerminalId);
     /// Unfold a part of the system monitor, or fold it away again.
     ToggleMonitorDetail(MonitorDetail);
+    /// Unfold a device of GPU/NPU to its details, or fold them away again,
+    /// by its key.
+    ToggleGpuDevice(String);
     /// Sort the process list by memory or CPU, the most first; by the same
     /// again, the other way.
     SortProcesses(ProcessSort);
@@ -382,25 +404,85 @@ pub enum ToolKind {
     #[default]
     Snippets,
     History,
+    Files,
     Docker,
     Kubernetes,
     Services,
     Processes,
     Connections,
     Monitor,
+    Gpu,
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 8] = [
+    pub const ALL: [ToolKind; 10] = [
         ToolKind::Snippets,
         ToolKind::History,
+        ToolKind::Files,
         ToolKind::Docker,
         ToolKind::Kubernetes,
         ToolKind::Services,
         ToolKind::Processes,
         ToolKind::Connections,
         ToolKind::Monitor,
+        ToolKind::Gpu,
     ];
+
+    /// What `settings.json` calls the tool in 侧栏功能. Never changed once
+    /// released: a renamed key would bring a hidden tool back.
+    pub fn key(self) -> &'static str {
+        match self {
+            ToolKind::Snippets => "snippets",
+            ToolKind::History => "history",
+            ToolKind::Files => "files",
+            ToolKind::Docker => "docker",
+            ToolKind::Kubernetes => "kubernetes",
+            ToolKind::Services => "services",
+            ToolKind::Processes => "processes",
+            ToolKind::Connections => "connections",
+            ToolKind::Monitor => "monitor",
+            ToolKind::Gpu => "gpu",
+        }
+    }
+
+    /// Whether the sidebar offers the tool until the user says otherwise.
+    /// Not GPU/NPU: most hosts have neither.
+    pub fn shown_by_default(self) -> bool {
+        !matches!(self, ToolKind::Gpu)
+    }
+
+    pub fn label(self) -> SharedString {
+        match self {
+            ToolKind::Snippets => t!("tools.kind.snippets"),
+            ToolKind::History => t!("tools.kind.history"),
+            ToolKind::Files => t!("tools.kind.files"),
+            ToolKind::Docker => "Docker".into(),
+            ToolKind::Kubernetes => "Kubernetes".into(),
+            ToolKind::Services => t!("tools.kind.services"),
+            ToolKind::Processes => t!("tools.kind.processes"),
+            ToolKind::Connections => t!("tools.kind.connections"),
+            ToolKind::Monitor => t!("tools.kind.monitor"),
+            ToolKind::Gpu => "GPU/NPU".into(),
+        }
+    }
+
+    /// Lucide glyphs, but for Docker, which goes by its whale: a box said
+    /// nothing about Docker.
+    pub fn icon(self) -> Icon {
+        Icon::new(match self {
+            ToolKind::Snippets => CatalogIcon::CodeXml,
+            ToolKind::History => CatalogIcon::RotateCcwClock,
+            // Not the SFTP button's folder tree, which opens a tab.
+            ToolKind::Files => return Icon::new(IconName::Folder),
+            ToolKind::Docker => return Icon::default().path(DOCKER_ICON),
+            ToolKind::Kubernetes => CatalogIcon::ShipWheel,
+            ToolKind::Services => CatalogIcon::ServerCog,
+            ToolKind::Processes => CatalogIcon::ListFilter,
+            ToolKind::Connections => CatalogIcon::Network,
+            ToolKind::Monitor => CatalogIcon::Activity,
+            ToolKind::Gpu => CatalogIcon::Gpu,
+        })
+    }
 }
 
 /// Which tabs of a tab bar a batch close takes, relative to one tab.
@@ -482,6 +564,12 @@ pub enum ExplorerCommand {
     OpenDirectory {
         remote: bool,
     },
+    /// 查找文件, WinSCP's Find Files: on the remote side only, as there.
+    FindFiles,
+    /// 定位 in 查找文件: show a remote path's folder and select it there.
+    Reveal {
+        path: String,
+    },
     /// 复制路径 on the path label: the directory shown.
     CopyPath {
         remote: bool,
@@ -533,6 +621,10 @@ pub enum ExplorerCommand {
     /// Ask to delete the pane's selection.
     Delete {
         remote: bool,
+    },
+    /// 删除 in 查找文件, confirmed there: remote paths in any folders.
+    DeletePaths {
+        paths: Vec<String>,
     },
     /// Carry out a confirmed delete, rename, new item or permission change
     /// in the pane's directory.

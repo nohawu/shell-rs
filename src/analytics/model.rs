@@ -50,6 +50,8 @@ pub enum Counter {
     Sftp,
     SftpTemporary,
     SftpExternal,
+    /// 查找文件 opened in an SFTP tab.
+    SftpFind,
     LocalTerminal,
     /// A port forward started, by the user or with ShellRS.
     ForwardLocal,
@@ -66,12 +68,14 @@ pub enum Counter {
     /// A tool of the right sidebar opened.
     ToolSnippets,
     ToolHistory,
+    ToolFiles,
     ToolDocker,
     ToolKubernetes,
     ToolServices,
     ToolProcesses,
     ToolNetstat,
     ToolMonitor,
+    ToolGpu,
     /// A snippet, or a command from the history, put into a terminal.
     CommandSnippet,
     CommandHistory,
@@ -97,7 +101,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 45] = [
+    pub const ALL: [Counter; 48] = [
         Self::Ssh,
         Self::SshJump,
         Self::SshProxy,
@@ -108,6 +112,7 @@ impl Counter {
         Self::Sftp,
         Self::SftpTemporary,
         Self::SftpExternal,
+        Self::SftpFind,
         Self::LocalTerminal,
         Self::ForwardLocal,
         Self::ForwardRemote,
@@ -120,12 +125,14 @@ impl Counter {
         Self::PreviewMarkdown,
         Self::ToolSnippets,
         Self::ToolHistory,
+        Self::ToolFiles,
         Self::ToolDocker,
         Self::ToolKubernetes,
         Self::ToolServices,
         Self::ToolProcesses,
         Self::ToolNetstat,
         Self::ToolMonitor,
+        Self::ToolGpu,
         Self::CommandSnippet,
         Self::CommandHistory,
         Self::Find,
@@ -157,6 +164,7 @@ impl Counter {
             Self::Sftp => "sftp",
             Self::SftpTemporary => "sftp_temporary",
             Self::SftpExternal => "sftp_external",
+            Self::SftpFind => "sftp_find",
             Self::LocalTerminal => "local_terminal",
             Self::ForwardLocal => "forward_local",
             Self::ForwardRemote => "forward_remote",
@@ -169,12 +177,14 @@ impl Counter {
             Self::PreviewMarkdown => "preview_markdown",
             Self::ToolSnippets => "tool_snippets",
             Self::ToolHistory => "tool_history",
+            Self::ToolFiles => "tool_files",
             Self::ToolDocker => "tool_docker",
             Self::ToolKubernetes => "tool_kubernetes",
             Self::ToolServices => "tool_services",
             Self::ToolProcesses => "tool_processes",
             Self::ToolNetstat => "tool_netstat",
             Self::ToolMonitor => "tool_monitor",
+            Self::ToolGpu => "tool_gpu",
             Self::CommandSnippet => "command_snippet",
             Self::CommandHistory => "command_history",
             Self::Find => "find",
@@ -220,6 +230,8 @@ pub struct Snapshot {
     pub update_channel: &'static str,
     /// Whether any keyboard shortcut was changed.
     pub custom_shortcuts: bool,
+    /// The SFTP lists' 图标风格: `monochrome` or `color`.
+    pub file_icons: &'static str,
     /// How many are saved; only their band goes out.
     pub hosts: usize,
     pub credentials: usize,
@@ -245,6 +257,7 @@ impl Snapshot {
                 "custom_shortcuts",
                 if self.custom_shortcuts { "yes" } else { "no" },
             ),
+            ("file_icons", self.file_icons),
             ("hosts", band(self.hosts)),
             ("credentials", band(self.credentials)),
             ("forwards", band(self.forwards)),
@@ -701,6 +714,7 @@ mod tests {
             light_theme: "shellrs-light",
             dark_theme: "shellrs-dark",
             update_channel: "stable",
+            file_icons: "monochrome",
             hosts: 7,
             ..Snapshot::default()
         }
@@ -794,6 +808,7 @@ mod tests {
         assert_eq!(props["credentials"], "0");
         assert_eq!(props["highlight"], "off");
         assert_eq!(props["custom_shortcuts"], "no");
+        assert_eq!(props["file_icons"], "monochrome");
         assert!(props.values().all(Value::is_string));
         assert_eq!(band(5), "1-5");
         assert_eq!(band(100), "21-100");

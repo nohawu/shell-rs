@@ -2,6 +2,7 @@ use super::{
     ExplorerId, FileLocation, FilePane, FilePaneEvent, LoadIntent, PaneSide, QueueId, QueueState,
     Removal, TransferJob, TransferQueue,
     file_edit::{Opening, PendingFile},
+    find_window::{FIND_REQUESTS, FindWindow},
     pane_operations::PendingOperation,
     preview::PreviewKind,
 };
@@ -15,9 +16,9 @@ use crate::{
     host::{BookmarkSide, ConnectionState, HostId, HostStore},
     i18n::t,
     sftp::{
-        DownloadRequest, RemotePath, SftpCommand, SftpEvent, SharedLocalDirectoryProvider,
-        SharedSftpTransportProvider, TextFile, TransferDirection, TransferPhase, TransferQuestion,
-        UploadRequest,
+        DownloadRequest, RemotePath, SftpCommand, SftpEvent, SftpRoute,
+        SharedLocalDirectoryProvider, SharedSftpTransportProvider, TextFile, TransferDirection,
+        TransferPhase, TransferQuestion, UploadRequest,
     },
     shared::{ClosableTabTitle, HostMark, LatencyLabel, RenamableTab, close_tab_items},
 };
@@ -67,7 +68,11 @@ pub struct ExplorerPanel {
     /// id; the files being read for a new editor tab.
     pub(super) files: HashMap<u64, PendingFile>,
     pub(super) opening: HashSet<FileLocation>,
-    commands: async_channel::Sender<SftpCommand>,
+    /// 查找文件's window, while it is open, and the name it last searched
+    /// for, which the next one starts with.
+    pub(super) find: Option<FindWindow>,
+    pub(super) find_mask: String,
+    pub(super) commands: async_channel::Sender<SftpCommand>,
     state: ConnectionState,
     /// The connection's latest round trip; none until the first one after
     /// connecting comes back.
@@ -91,6 +96,15 @@ pub struct ExplorerPanel {
     custom_title: Option<SharedString>,
     /// The pane that held focus last, which takes it back on activation.
     last_remote: bool,
+    /// The right sidebar's 文件 for a remote terminal, on the terminal's
+    /// connection: the remote pane alone, with no tab of its own. The local
+    /// pane is never shown, nor listed; it only holds where downloads go.
+    sidebar: bool,
+    /// The sidebar's 目录跟随: it goes where the terminal's shell reports
+    /// it is, as `follow_directory` hears of it.
+    follow: bool,
+    /// A folder to go to once connected, reported while it was not.
+    follow_target: Option<String>,
     /// Where the user put the divider between the panes, and the one above
     /// the queue. Kept here, not in element state, which goes the first
     /// frame another tab is shown instead: coming back would reset them.
@@ -106,6 +120,7 @@ impl ExplorerPanel {
         host_id: HostId,
         store: Entity<HostStore>,
         provider: SharedSftpTransportProvider,
+        route: SftpRoute,
         local_provider: SharedLocalDirectoryProvider,
         dispatch: FocusHandle,
         window: &mut Window,
@@ -116,7 +131,13 @@ impl ExplorerPanel {
             .login(host_id)
             .expect("workspace checked host");
         let endpoint = login.endpoint();
-        let home = local_provider.home().to_string_lossy().into_owned();
+        let sidebar = matches!(route, SftpRoute::Terminal(_));
+        let home = if sidebar {
+            local_provider.downloads()
+        } else {
+            local_provider.home()
+        };
+        let home = home.to_string_lossy().into_owned();
         let local = cx.new(|cx| {
             FilePane::new(
                 PaneSide::Local,
@@ -141,12 +162,18 @@ impl ExplorerPanel {
                 cx,
             )
         });
-        local.update(cx, |pane, cx| {
-            pane.load_local(home, LoadIntent::Reload, local_provider.clone(), window, cx)
-        });
+        // Listing a folder such as Downloads makes macOS ask for access,
+        // which a pane nobody sees has no business doing.
+        if sidebar {
+            remote.update(cx, |pane, cx| pane.set_compact(cx));
+        } else {
+            local.update(cx, |pane, cx| {
+                pane.load_local(home, LoadIntent::Reload, local_provider.clone(), window, cx)
+            });
+        }
         let (commands, receiver) = async_channel::unbounded();
         let (sender, events) = async_channel::unbounded();
-        let transport = provider.create(&login);
+        let transport = provider.create(&login, route);
         let failed = sender.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("shellrs-sftp".into())
@@ -206,6 +233,8 @@ impl ExplorerPanel {
                 this.send(SftpCommand::Shutdown);
                 async {}
             }),
+            // The main window closed, and the workspace with it.
+            cx.on_release(|this, cx| this.close_find(cx)),
         ];
         Self {
             id,
@@ -220,6 +249,8 @@ impl ExplorerPanel {
             next_operation: 0,
             files: HashMap::new(),
             opening: HashSet::new(),
+            find: None,
+            find_mask: String::new(),
             commands,
             state: ConnectionState::Connecting,
             latency: None,
@@ -233,6 +264,9 @@ impl ExplorerPanel {
             tab_group: None,
             custom_title: None,
             last_remote: true,
+            sidebar,
+            follow: false,
+            follow_target: None,
             panes_split: cx.new(|_| ResizableState::default()),
             queue_split: cx.new(|_| ResizableState::default()),
             _subscriptions: subscriptions,
@@ -268,6 +302,40 @@ impl ExplorerPanel {
     }
     pub fn connection_state(&self) -> ConnectionState {
         self.state
+    }
+    /// The right sidebar's 文件 rather than an SFTP tab.
+    pub fn is_sidebar(&self) -> bool {
+        self.sidebar
+    }
+    /// 目录跟随 is on.
+    pub fn follows(&self) -> bool {
+        self.follow
+    }
+    /// Turn 目录跟随 on or off, which its switch in the status line shows.
+    pub fn set_follow(&mut self, follow: bool, cx: &mut Context<Self>) {
+        self.follow = follow;
+        if !follow {
+            self.follow_target = None;
+        }
+        self.remote
+            .update(cx, |pane, cx| pane.set_follow(follow, cx));
+        cx.notify();
+    }
+    /// The terminal connected again: what it reported before is history.
+    pub fn forget_follow_target(&mut self) {
+        self.follow_target = None;
+    }
+    /// Go where the terminal's shell reports it is, when following: now if
+    /// connected, else once connected. It never connects just for this.
+    pub fn follow_directory(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.follow {
+            return;
+        }
+        if self.state != ConnectionState::Connected {
+            self.follow_target = Some(path);
+        } else if self.remote.read(cx).path() != path {
+            self.navigate(true, path, LoadIntent::Visit, window, cx);
+        }
     }
     /// What the window's status line shows for this tab: its own connection,
     /// and what went wrong, remote side first.
@@ -462,15 +530,29 @@ impl ExplorerPanel {
             }
             SftpEvent::Connected { home } => {
                 self.state = ConnectionState::Connected;
+                let first = self.remote.read(cx).home().is_empty();
                 self.remote
                     .update(cx, |pane, _| pane.set_home(home.to_string()));
-                self.reload(true, window, cx);
+                // Where the terminal is, if it said while this connected;
+                // the first time without passing home in the history.
+                match self.follow_target.take() {
+                    Some(target) => {
+                        let intent = if first {
+                            LoadIntent::Reload
+                        } else {
+                            LoadIntent::Visit
+                        };
+                        self.navigate(true, target, intent, window, cx);
+                    }
+                    None => self.reload(true, window, cx),
+                }
                 cx.emit(ExplorerPanelEvent::StateChanged(self.id, self.host_id));
             }
             SftpEvent::Disconnected(message) => {
                 self.state = ConnectionState::Disconnected;
                 self.latency = None;
                 self.abandon_remote_operations(cx);
+                self.find_connection_lost(cx);
                 self.remote
                     .update(cx, |pane, cx| pane.disconnected(message, cx));
                 cx.emit(ExplorerPanelEvent::StateChanged(self.id, self.host_id));
@@ -481,6 +563,10 @@ impl ExplorerPanel {
                 self.generation,
                 prompt,
             )),
+            // The search's listings, and an answer to one stopped since.
+            SftpEvent::Listed { request_id, result } if request_id >= FIND_REQUESTS => {
+                self.find_listed(request_id, result, cx)
+            }
             SftpEvent::Listed { request_id, result } => self.remote.update(cx, |pane, cx| {
                 pane.apply_listing(request_id, result, window, cx)
             }),
@@ -564,6 +650,10 @@ impl ExplorerPanel {
     ) {
         // Nothing would answer; the pane would wait forever.
         if remote && self.state != ConnectionState::Connected {
+            return;
+        }
+        // The sidebar's local pane is only a download target.
+        if !remote && self.sidebar {
             return;
         }
         let pane = self.pane(remote).clone();
@@ -694,6 +784,26 @@ impl ExplorerPanel {
                 self.set_current_pane(*remote, cx);
                 self.open_directory(*remote, window, cx);
             }
+            // Finding lives in SFTP tabs: its 定位 needs a pane on screen.
+            ExplorerCommand::FindFiles | ExplorerCommand::Reveal { .. } if self.sidebar => {}
+            ExplorerCommand::FindFiles => {
+                self.set_current_pane(true, cx);
+                self.open_find(window, cx);
+            }
+            ExplorerCommand::Reveal { path } => {
+                let (directory, name) = match path.rsplit_once('/') {
+                    Some(("", name)) => ("/".to_string(), name),
+                    Some((directory, name)) => (directory.to_string(), name),
+                    None => return,
+                };
+                if self.state == ConnectionState::Connected {
+                    self.remote
+                        .update(cx, |pane, _| pane.select_after_load(name.to_string()));
+                    self.navigate(true, directory, LoadIntent::Visit, window, cx);
+                }
+                let focus = self.remote.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
             ExplorerCommand::CopyPath { remote } => {
                 let path = self.pane(*remote).read(cx).path();
                 if !path.is_empty() {
@@ -718,7 +828,7 @@ impl ExplorerPanel {
                 }
             }
             ExplorerCommand::FocusPane { remote } => {
-                let focus = self.pane(*remote).read(cx).focus_handle(cx);
+                let focus = self.pane(*remote || self.sidebar).read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
             ExplorerCommand::MoveCursor {
@@ -757,6 +867,7 @@ impl ExplorerPanel {
             }
             ExplorerCommand::Enqueue(job) => self.enqueue(job.clone(), window, cx),
             ExplorerCommand::Delete { remote } => self.confirm_delete(*remote, window, cx),
+            ExplorerCommand::DeletePaths { paths } => self.delete_paths(paths.clone(), window, cx),
             ExplorerCommand::Rename { remote } => self.open_rename(*remote, window, cx),
             ExplorerCommand::New { remote, kind } => self.open_new(*remote, *kind, window, cx),
             ExplorerCommand::Properties { remote } => self.open_properties(*remote, window, cx),
@@ -850,6 +961,18 @@ impl ExplorerPanel {
         cx.notify();
     }
 }
+impl ExplorerPanel {
+    /// End this explorer: its connection, its find window, and then its
+    /// place in the workspace, which the `Closed` event clears. An SFTP tab
+    /// does this as the dock removes it; the sidebar's 文件, which is in no
+    /// dock, when its terminal goes.
+    pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_find(cx);
+        self.disconnect(window, cx);
+        self.send(SftpCommand::Shutdown);
+        cx.emit(ExplorerPanelEvent::Closed(self.id, self.host_id));
+    }
+}
 impl Drop for ExplorerPanel {
     fn drop(&mut self) {
         self.send(SftpCommand::Shutdown);
@@ -887,10 +1010,8 @@ impl BasePanel for ExplorerPanel {
         self.tab_group = Some(group);
     }
     fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.disconnect(window, cx);
-        self.send(SftpCommand::Shutdown);
         self.tab_group = None;
-        cx.emit(ExplorerPanelEvent::Closed(self.id, self.host_id));
+        self.close(window, cx);
     }
 }
 impl Panel for ExplorerPanel {
@@ -905,6 +1026,7 @@ impl Panel for ExplorerPanel {
         // The host's mark, as on the host's terminal tabs.
         let mark = HostMark::new(("explorer-tab-os", id.0), name, os).small();
         ClosableTabTitle::new(("explorer-tab", id.0), mark, self.tab_title(cx))
+            .connection_state(self.connection_state())
             .closable(("close-explorer", id.0), Box::new(CloseExplorer(id)))
             .context_menu(move |popup, _, cx| menu.build(popup, cx))
     }
@@ -993,7 +1115,10 @@ fn needs_connection(command: &ExplorerCommand) -> bool {
         | C::New { remote, .. }
         | C::Properties { remote }
         | C::Operate { remote, .. } => *remote,
-        C::Transfer { .. }
+        C::FindFiles
+        | C::Reveal { .. }
+        | C::DeletePaths { .. }
+        | C::Transfer { .. }
         | C::DownloadPaths { .. }
         | C::ChooseFiles
         | C::UploadPaths { .. }
@@ -1103,6 +1228,27 @@ impl TabMenu {
 impl Render for ExplorerPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sid = self.id;
+        let panes = if self.sidebar {
+            self.remote.clone().into_any_element()
+        } else {
+            h_resizable(("explorer-panes", sid.0))
+                .with_state(&self.panes_split)
+                .child(
+                    // Half and half when the tab opens; the state then keeps
+                    // where the user puts the divider.
+                    resizable_panel()
+                        .flex_basis(relative(0.5))
+                        .size_range(px(320.)..Pixels::MAX)
+                        .child(self.local.clone()),
+                )
+                .child(
+                    resizable_panel()
+                        .flex_basis(relative(0.5))
+                        .size_range(px(280.)..Pixels::MAX)
+                        .child(self.remote.clone()),
+                )
+                .into_any_element()
+        };
         // The queue always has its place, shown only with something in it,
         // so the panes keep their split when it comes and goes.
         v_flex()
@@ -1115,27 +1261,7 @@ impl Render for ExplorerPanel {
                 div().flex_1().min_h_0().child(
                     v_resizable(("explorer-queue", sid.0))
                         .with_state(&self.queue_split)
-                        .child(
-                            resizable_panel().child(
-                                h_resizable(("explorer-panes", sid.0))
-                                    .with_state(&self.panes_split)
-                                    .child(
-                                        // Half and half when the tab opens; the
-                                        // state then keeps where the user puts
-                                        // the divider.
-                                        resizable_panel()
-                                            .flex_basis(relative(0.5))
-                                            .size_range(px(320.)..Pixels::MAX)
-                                            .child(self.local.clone()),
-                                    )
-                                    .child(
-                                        resizable_panel()
-                                            .flex_basis(relative(0.5))
-                                            .size_range(px(280.)..Pixels::MAX)
-                                            .child(self.remote.clone()),
-                                    ),
-                            ),
-                        )
+                        .child(resizable_panel().child(panes))
                         .child(
                             resizable_panel()
                                 .size(px(180.))

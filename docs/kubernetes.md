@@ -4,7 +4,7 @@
 
 Kubernetes 是远程终端右侧栏的一个工具。集群来自 **SSH 主机**上的 kubeconfig，不是运行 ShellRS 的电脑。连接到能访问集群的管理主机后，在右侧选择 Kubernetes。
 
-可在「设置 → 应用 → 功能模块」开启或关闭 Kubernetes，默认开启，选择会跨启动保存。关闭立即隐藏入口、释放面板并停止列表、日志和性能刷新；再次开启后，从终端右侧重新打开即可使用。
+可在「设置 → 终端 → 侧栏功能」开启或关闭 Kubernetes，默认开启，选择会跨启动保存。关闭立即隐藏入口、释放面板并停止列表、日志和性能刷新；再次开启后，从终端右侧重新打开即可使用。
 
 内存的容量、可分配量、容器 requests / limits 和实时用量统一显示为 G（1024³ 字节），小于 0.01 G 的正值显示为 `<0.01 G`。概览时间及 kubectl 日志时间前缀统一显示为东八区（UTC+08:00）；YAML、应用日志正文和复制的原始日志保留原值，日志搜索匹配显示的时间。
 
@@ -13,7 +13,7 @@ Kubernetes 面板在首次选择时才创建。未使用时不创建其输入控
 ## 查询范围
 
 - **集群（context）**：读取 `kubectl config current-context` 和 `kubectl config get-contexts -o name`，支持选择其他 context。所有 API 请求带 `--context`，不会执行 `use-context` 或改动 kubeconfig。
-- **命名空间**：通过 `kubectl get namespaces -o json` 读取完整列表，名称排序。默认“全部命名空间”，API 请求使用 `--all-namespaces`；选择一个 namespace 后，请求改为明确的 `--namespace`。
+- **命名空间**：通过 kubectl 按 Kubernetes API 分页读取完整列表，名称排序。默认“全部命名空间”，查询跨命名空间的 API 路径；选择一个 namespace 后，查询限定到该命名空间的路径。
 - **面板**：节点、资源同级切换，共享当前 context。节点展示容量、地址和就绪状态；节点、Namespace、PV、StorageClass 的查询不带命名空间参数。
 - **资源类型**：Pod、Deployment（deploy）、StatefulSet（sts）、DaemonSet、ReplicaSet、Service（svc）、Ingress、Job、CronJob、PVC、Namespace、ConfigMap、Secret、ServiceAccount、PV、StorageClass、HPA、PDB、EndpointSlice。Secret 的列表与详情仅读取元数据，不读取 `data` / `stringData`。
 - **搜索**：在当前类型和命名空间查询结果中，按名称、命名空间、状态、标签进行不区分大小写的过滤，不额外执行服务器命令。

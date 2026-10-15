@@ -26,7 +26,9 @@ use crate::app::{
     RemoveAgentSkill, RemoveCliCommand, ShowUpdate,
 };
 use crate::cli::{AgentKind, BinaryStatus, CliIntegration, IntegrationStatus, SkillStatus};
+use crate::explorer::{FileIcon, FileIconKind};
 use crate::i18n::t;
+use crate::sftp::{DEFAULT_PARALLEL_TRANSFERS, PARALLEL_TRANSFERS_RANGE};
 use crate::shared::{ClosableTabTitle, close_tab_items};
 use crate::terminal::{
     FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, TerminalColors, TerminalFont, TerminalFontPreview,
@@ -37,8 +39,12 @@ use crate::update::{Phase, Tone, UpdateSnapshot, UpdateStep, Updater, build_info
 use super::highlight_rules::HighlightRulesEditor;
 use super::local_shell_editor::{LocalShellEditor, local_shell_field};
 use super::shortcuts_editor::{ShortcutsEditor, shortcut_groups};
+use super::sidebar_tools::sidebar_tools_group;
 use super::terminal_themes::{app_follows_item, terminal_theme_item};
-use super::{AppSettings, Choice, NotificationSettings, SettingsStore, WindowSettings};
+use super::{
+    AppSettings, Choice, INTERFACE_FONT_SIZE_RANGE, NotificationSettings, SettingsStore,
+    WindowSettings,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPanelEvent {
@@ -244,7 +250,7 @@ struct Category {
 type CategoryGroups = fn(&SettingsPanel, &App) -> Vec<SettingGroup>;
 
 /// The categories, in the order the left column lists them.
-const CATEGORIES: [Category; 7] = [
+const CATEGORIES: [Category; 8] = [
     Category {
         title: "settings.category.appearance",
         icon: CatalogIcon::Palette,
@@ -254,6 +260,11 @@ const CATEGORIES: [Category; 7] = [
         title: "settings.category.terminal",
         icon: CatalogIcon::Terminal,
         groups: terminal_groups,
+    },
+    Category {
+        title: "settings.category.sftp",
+        icon: CatalogIcon::FolderTree,
+        groups: sftp_groups,
     },
     Category {
         title: "settings.category.highlight",
@@ -321,6 +332,17 @@ fn appearance_groups(panel: &SettingsPanel, _: &App) -> Vec<SettingGroup> {
                         |settings, appearance| settings.appearance = appearance,
                     ),
                 ),
+                SettingItem::new(
+                    t!("settings.appearance.font_size"),
+                    font_size_field(
+                        store,
+                        INTERFACE_FONT_SIZE_RANGE,
+                        |settings| settings.interface.font_size,
+                        |settings, size| settings.interface.font_size = size,
+                    ),
+                )
+                .description(t!("settings.appearance.font_size_description"))
+                .keywords(keywords(t!("settings.appearance.font_size_keywords"))),
             ]),
         SettingGroup::new()
             .title(t!("settings.appearance.theme"))
@@ -352,8 +374,16 @@ fn terminal_groups(panel: &SettingsPanel, cx: &App) -> Vec<SettingGroup> {
             .items([
                 SettingItem::new(t!("settings.terminal.family"), font_family_field(panel, cx))
                     .description(t!("settings.terminal.family_description")),
-                SettingItem::new(t!("settings.terminal.size"), font_size_field(store))
-                    .description(t!("settings.terminal.size_description")),
+                SettingItem::new(
+                    t!("settings.terminal.size"),
+                    font_size_field(
+                        store,
+                        FONT_SIZE_RANGE,
+                        |settings| settings.terminal_font.size,
+                        |settings, size| settings.terminal_font.size = size,
+                    ),
+                )
+                .description(t!("settings.terminal.size_description")),
                 SettingItem::new(
                     t!("settings.terminal.line_height"),
                     number_field(
@@ -392,6 +422,7 @@ fn terminal_groups(panel: &SettingsPanel, cx: &App) -> Vec<SettingGroup> {
                 .keywords(keywords(t!("settings.terminal.preview_keywords"))),
             ]),
         interaction_group(store),
+        sidebar_tools_group(store),
         notification_group(store),
         local_terminal_group(panel),
     ]
@@ -495,6 +526,129 @@ fn notification_group(store: &Entity<SettingsStore>) -> SettingGroup {
         ])
 }
 
+/// What the SFTP preview lists after a plain folder and a plain file: what a
+/// server's home folder and a project deployed on it hold, each with a color
+/// icon of its own, dot files lighter as when the lists show them.
+const FILE_ICON_PREVIEW: &[(&str, FileIconKind)] = &[
+    (".config", FileIconKind::Folder),
+    ("logs", FileIconKind::Folder),
+    ("scripts", FileIconKind::Folder),
+    (".bashrc", FileIconKind::File),
+    ("deploy.sh", FileIconKind::File),
+    ("docker-compose.yml", FileIconKind::File),
+    ("nginx.conf", FileIconKind::File),
+    ("backup.tar.gz", FileIconKind::File),
+];
+
+/// SFTP: how many files move at once, the right sidebar's 文件, and the
+/// file lists' icons and how they look.
+fn sftp_groups(panel: &SettingsPanel, _: &App) -> Vec<SettingGroup> {
+    let (follow_reader, follow_writer) = (panel.store.clone(), panel.store.clone());
+    vec![
+        SettingGroup::new()
+            .title(t!("settings.sftp.transfers"))
+            .items([SettingItem::new(
+                t!("settings.sftp.parallel"),
+                parallel_transfers_field(&panel.store),
+            )
+            .description(t!("settings.sftp.parallel_description"))
+            .keywords(keywords(t!("settings.sftp.parallel_keywords")))]),
+        SettingGroup::new()
+            .title(t!("settings.sftp.file_sidebar"))
+            .items([SettingItem::new(
+                t!("settings.sftp.detect_follow"),
+                SettingField::switch(
+                    move |cx| {
+                        follow_reader
+                            .read(cx)
+                            .settings()
+                            .file_sidebar
+                            .detect_directory_follow
+                    },
+                    move |on, cx| {
+                        follow_writer.update(cx, |store, cx| {
+                            store.update(
+                                |settings| settings.file_sidebar.detect_directory_follow = on,
+                                cx,
+                            )
+                        });
+                    },
+                )
+                .default_value(true),
+            )
+            .description(t!("settings.sftp.detect_follow_description"))
+            .keywords(keywords(t!("settings.sftp.follow_keywords")))]),
+        SettingGroup::new()
+            .title(t!("settings.sftp.file_list"))
+            .items([
+                SettingItem::new(
+                    t!("settings.sftp.icon_style"),
+                    choice_field(
+                        &panel.store,
+                        |settings| settings.file_icon_style,
+                        |settings, style| settings.file_icon_style = style,
+                    ),
+                )
+                .description(t!("settings.sftp.icon_style_description")),
+                SettingItem::render(|_, _, cx| {
+                    let row = |id: &str, label: SharedString, icon: FileIcon, hidden: bool| {
+                        h_flex()
+                            .id(ElementId::Name(format!("preview:{id}").into()))
+                            .min_w_0()
+                            .gap_2()
+                            .when(hidden, |row| row.text_color(cx.theme().muted_foreground))
+                            .child(icon.dimmed(hidden))
+                            .child(div().min_w_0().truncate().child(label))
+                            .test_support()
+                    };
+                    // The plain ones first, side by side, called what they
+                    // are. Named nothing, they get the plain icons whatever
+                    // the label says.
+                    let plain = [
+                        (
+                            "folder",
+                            t!("settings.sftp.preview_folder"),
+                            FileIconKind::Folder,
+                        ),
+                        ("file", t!("settings.sftp.preview_file"), FileIconKind::File),
+                    ]
+                    .into_iter()
+                    .map(|(id, label, kind)| row(id, label, FileIcon::new("", kind), false));
+                    let named = FILE_ICON_PREVIEW.iter().map(|&(name, kind)| {
+                        row(
+                            name,
+                            name.into(),
+                            FileIcon::new(name, kind),
+                            name.starts_with('.'),
+                        )
+                    });
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(div().text_sm().child(t!("settings.preview")))
+                        .child(
+                            div()
+                                .id("file-icon-preview")
+                                .test_support()
+                                .w_full()
+                                .grid()
+                                .grid_cols(2)
+                                .gap_x_4()
+                                .gap_y_1()
+                                .p_3()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().tokens.table)
+                                .text_sm()
+                                .children(plain.chain(named)),
+                        )
+                })
+                .keywords(keywords(t!("settings.sftp.keywords"))),
+            ]),
+    ]
+}
+
 /// What the 关键字高亮 preview shows: a service's log followed on a server,
 /// with what the example rules color (levels and addresses) and lines they
 /// leave alone.
@@ -595,7 +749,6 @@ fn shortcuts_groups(panel: &SettingsPanel, _: &App) -> Vec<SettingGroup> {
 /// 应用 → 窗口: what the next launch restores of the main window.
 fn application_groups(panel: &SettingsPanel, _: &App) -> Vec<SettingGroup> {
     let store = &panel.store;
-    let (module_reader, module_writer) = (store.clone(), store.clone());
     let switch = |read: fn(&WindowSettings) -> bool, write: fn(&mut WindowSettings, bool)| {
         let (reader, writer) = (store.clone(), store.clone());
         SettingField::switch(
@@ -629,22 +782,6 @@ fn application_groups(panel: &SettingsPanel, _: &App) -> Vec<SettingGroup> {
                 )
                 .description(t!("settings.window.remember_position_description")),
             ]),
-        SettingGroup::new()
-            .title(t!("settings.modules.title"))
-            .items([SettingItem::new(
-                "Kubernetes",
-                SettingField::switch(
-                    move |cx| module_reader.read(cx).settings().modules.kubernetes,
-                    move |enabled, cx| {
-                        module_writer.update(cx, |store, cx| {
-                            store.update(|settings| settings.modules.kubernetes = enabled, cx)
-                        });
-                    },
-                )
-                .default_value(true),
-            )
-            .description(t!("settings.modules.kubernetes_description"))
-            .keywords(keywords("k8s Kubernetes".into()))]),
     ]
 }
 
@@ -1175,15 +1312,17 @@ fn font_family_field(panel: &SettingsPanel, cx: &App) -> SettingField<SharedStri
     .default_value(default_family)
 }
 
-/// The terminal font size, a dropdown of whole pixels. Not a number input:
-/// that clamps to its minimum as each digit is typed, so 「14」 would turn
-/// into 10 at its 「1」.
-fn font_size_field(store: &Entity<SettingsStore>) -> SettingField<SharedString> {
-    let default = AppSettings::default().terminal_font.size;
-    let (start, end) = (
-        *FONT_SIZE_RANGE.start() as u32,
-        *FONT_SIZE_RANGE.end() as u32,
-    );
+/// A font size, a dropdown of the whole pixels in `range`. Not a number
+/// input: that clamps to its minimum as each digit is typed, so 「14」 would
+/// turn into 10 at its 「1」.
+fn font_size_field(
+    store: &Entity<SettingsStore>,
+    range: std::ops::RangeInclusive<f32>,
+    read: fn(&AppSettings) -> f32,
+    write: fn(&mut AppSettings, f32),
+) -> SettingField<SharedString> {
+    let default = read(&AppSettings::default());
+    let (start, end) = (*range.start() as u32, *range.end() as u32);
     let options = (start..=end)
         .map(|size| {
             let key = SharedString::from(size.to_string());
@@ -1198,24 +1337,52 @@ fn font_size_field(store: &Entity<SettingsStore>) -> SettingField<SharedString> 
     let (reader, writer) = (store.clone(), store.clone());
     SettingField::scrollable_dropdown(
         options,
-        move |cx| {
-            reader
-                .read(cx)
-                .settings()
-                .terminal_font
-                .size
-                .to_string()
-                .into()
-        },
+        move |cx| read(&reader.read(cx).settings()).to_string().into(),
         move |size: SharedString, cx| {
             if let Ok(size) = size.parse::<f32>() {
                 writer.update(cx, |store, cx| {
-                    store.update(|settings| settings.terminal_font.size = size, cx)
+                    store.update(|settings| write(settings, size), cx)
                 });
             }
         },
     )
     .default_value(default.to_string())
+}
+
+/// 最大同时传输数量, a dropdown of whole numbers as the font size's is.
+fn parallel_transfers_field(store: &Entity<SettingsStore>) -> SettingField<SharedString> {
+    let options = PARALLEL_TRANSFERS_RANGE
+        .map(|count| {
+            let key = SharedString::from(count.to_string());
+            let label = if count == DEFAULT_PARALLEL_TRANSFERS {
+                t!("settings.default_option", value = count)
+            } else {
+                key.clone()
+            };
+            (key, label)
+        })
+        .collect();
+    let (reader, writer) = (store.clone(), store.clone());
+    SettingField::dropdown(
+        options,
+        move |cx| {
+            reader
+                .read(cx)
+                .settings()
+                .transfers
+                .parallel
+                .to_string()
+                .into()
+        },
+        move |count: SharedString, cx| {
+            if let Ok(count) = count.parse::<usize>() {
+                writer.update(cx, |store, cx| {
+                    store.update(|settings| settings.transfers.parallel = count, cx)
+                });
+            }
+        },
+    )
+    .default_value(DEFAULT_PARALLEL_TRANSFERS.to_string())
 }
 
 /// A number input over one number of the settings. The store rounds what

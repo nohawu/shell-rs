@@ -6,7 +6,7 @@ use std::{
 };
 
 use gpui_kit::component::{
-    ActiveTheme as _, Root, Sizable as _, Theme, TitleBar, WindowExt as _,
+    ActiveTheme as _, Root, Sizable as _, TitleBar, WindowExt as _,
     button::ButtonVariant,
     dialog::DialogButtonProps,
     dock::{DockArea, DockEvent, DockLayout, DockPlacement, PanelId, TabGroup, panel_handle},
@@ -33,9 +33,9 @@ use crate::app::{
     MoveHostNode, NewChildGroup, NewGroup, NewHost, NewHostInGroup, NewLocalTerminal,
     NewTemporaryConnection, OpenExplorer, OpenSettings, PasteTerminal, QuickConnect,
     ReconnectTerminal, RefreshCliIntegration, RemoveAgentSkill, RemoveCliCommand, RenameExplorer,
-    RenameGroup, RenameTerminal, RestartLocalTerminal, SetFileSizeFormat, ToggleHiddenFiles,
-    ToggleHostPanel, ToggleTheme, ZoomIn, ZoomOut, ZoomReset, ZoomTerminalIn, ZoomTerminalOut,
-    ZoomTerminalReset,
+    RenameGroup, RenameTerminal, RestartLocalTerminal, SelectAllTerminal, SetFileSizeFormat,
+    ToggleHiddenFiles, ToggleHostPanel, ToggleTheme, ToolKind, ZoomIn, ZoomOut, ZoomReset,
+    ZoomTerminalIn, ZoomTerminalOut, ZoomTerminalReset,
 };
 use crate::cli::{CliIntegration, CliServer, IntegrationPaths, SshCliBackend};
 use crate::connection::{
@@ -58,11 +58,11 @@ use crate::host::{
 };
 use crate::i18n::t;
 use crate::settings::{
-    Appearance, SettingsPanel, SettingsPanelEvent, SettingsStore, SettingsStoreEvent,
-    WindowSettings,
+    Appearance, DEFAULT_INTERFACE_FONT_SIZE, SettingsPanel, SettingsPanelEvent, SettingsStore,
+    SettingsStoreEvent, WindowSettings,
 };
 use crate::sftp::{
-    SharedLocalDirectoryProvider, SharedSftpTransportProvider, SshSftpTransportProvider,
+    SftpRoute, SharedLocalDirectoryProvider, SharedSftpTransportProvider, SshSftpTransportProvider,
     SystemLocalDirectoryProvider, TransferDirection,
 };
 use crate::shared::{commit_footer, confirm_danger, open_rename_tab_dialog};
@@ -88,11 +88,8 @@ use super::{
 
 const DOCK_ID: &str = "shellrs-dock";
 const DOCK_VERSION: usize = 1;
-/// Interface zoom bounds for the base font, in pixels (the theme's unit).
-const FONT_SIZE_MIN: f32 = 12.;
-const FONT_SIZE_MAX: f32 = 20.;
-const FONT_SIZE_DEFAULT: f32 = 16.;
-const FONT_SIZE_STEP: f32 = 2.;
+/// How far the zoom keys move 界面字号 a press, in pixels.
+const INTERFACE_ZOOM_STEP: f32 = 2.;
 /// Paint order of the notification layer. gpui-base draws a dialog, backdrop
 /// and all, deferred at priority `10 + its layer` (the dock skin's start page
 /// at 0); anything lower lands under the backdrop, dimmed, and a click on it
@@ -159,8 +156,15 @@ pub struct Workspace {
     /// The start page the dock skin shows while the center has no tab.
     recent: Entity<RecentHosts>,
     pub(super) terminals: HashMap<RemoteTerminalId, Entity<TerminalPanel>>,
-    /// SFTP tabs; a host can have several, like terminals.
+    /// SFTP tabs; a host can have several, like terminals. The right
+    /// sidebar's 文件 are here too, so commands, questions and editors reach
+    /// them the same way.
     pub(super) explorers: HashMap<ExplorerId, Entity<ExplorerPanel>>,
+    /// Each remote terminal's 文件, once shown: on the terminal's own
+    /// connection, and gone with the terminal.
+    pub(super) file_sidebars: HashMap<RemoteTerminalId, ExplorerId>,
+    /// 目录跟随: what each terminal's current connection was found to be.
+    pub(super) directory_follow: HashMap<RemoteTerminalId, super::follow::FollowState>,
     pub(super) local_terminals: HashMap<LocalTerminalId, Entity<LocalTerminalPanel>>,
     /// The settings tab, while it is open. There is only ever one.
     settings_tab: Option<Entity<SettingsPanel>>,
@@ -403,7 +407,12 @@ impl Workspace {
                 this.sync_cli_server(cx);
                 this.sync_updater(cx);
                 this.sync_analytics(window, cx);
-                if !settings.read(cx).settings().modules.kubernetes {
+                if !settings
+                    .read(cx)
+                    .settings()
+                    .sidebar_tools
+                    .shows(crate::app::ToolKind::Kubernetes)
+                {
                     if this.tools.read(cx).tool() == crate::app::ToolKind::Kubernetes {
                         this.tool_sidebar_wanted = false;
                     }
@@ -542,6 +551,8 @@ impl Workspace {
             recent,
             terminals,
             explorers: HashMap::new(),
+            file_sidebars: HashMap::new(),
+            directory_follow: HashMap::new(),
             local_terminals: HashMap::new(),
             settings_tab: None,
             settings,
@@ -616,12 +627,16 @@ impl Workspace {
         self.explorers.get(&id)
     }
 
-    /// A host's SFTP tabs, oldest first.
+    /// A host's SFTP tabs, oldest first. Not its terminals' 文件, which
+    /// come and go with the terminals.
     pub fn explorers_of(&self, host: HostId, cx: &App) -> Vec<Entity<ExplorerPanel>> {
         let mut explorers: Vec<_> = self
             .explorers
             .iter()
-            .filter(|(_, panel)| panel.read(cx).host_id() == host)
+            .filter(|(_, panel)| {
+                let panel = panel.read(cx);
+                panel.host_id() == host && !panel.is_sidebar()
+            })
             .collect();
         explorers.sort_by_key(|(id, _)| id.0);
         explorers
@@ -635,12 +650,71 @@ impl Workspace {
         self.terminals_of(host, cx).next().is_some() || !self.explorers_of(host, cx).is_empty()
     }
 
-    /// How many of a host's SFTP tabs are in the middle of a transfer.
+    /// How many of a host's SFTP tabs and terminals' 文件 are in the
+    /// middle of a transfer.
     fn transfers_of(&self, host: HostId, cx: &App) -> usize {
-        self.explorers_of(host, cx)
-            .iter()
-            .filter(|panel| panel.read(cx).is_transferring())
+        self.explorers
+            .values()
+            .filter(|panel| {
+                let panel = panel.read(cx);
+                panel.host_id() == host && panel.is_transferring()
+            })
             .count()
+    }
+
+    /// A remote terminal's 文件, once it has been shown.
+    pub fn file_sidebar(&self, terminal: RemoteTerminalId) -> Option<&Entity<ExplorerPanel>> {
+        self.explorers.get(self.file_sidebars.get(&terminal)?)
+    }
+
+    /// The terminal whose 文件 an explorer is, if it is one.
+    pub(super) fn sidebar_terminal(&self, explorer: ExplorerId) -> Option<RemoteTerminalId> {
+        self.file_sidebars
+            .iter()
+            .find(|(_, id)| **id == explorer)
+            .map(|(terminal, _)| *terminal)
+    }
+
+    /// A remote terminal's 文件, made the first time it is shown: SFTP on a
+    /// channel of the terminal's own connection, no login of its own.
+    pub(super) fn ensure_file_sidebar(
+        &mut self,
+        terminal: RemoteTerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ExplorerPanel>> {
+        if let Some(panel) = self.file_sidebar(terminal) {
+            return Some(panel.clone());
+        }
+        let panel = self.terminals.get(&terminal)?.read(cx);
+        let host_id = panel.host_id();
+        let channels = panel.terminal().read(cx).channels(cx);
+        let id = ExplorerId(self.next_explorer_id);
+        self.next_explorer_id += 1;
+        let (panel, subscription) =
+            new_explorer_panel(self, id, host_id, SftpRoute::Terminal(channels), window, cx);
+        self._subscriptions.push(subscription);
+        self.explorers.insert(id, panel.clone());
+        self.file_sidebars.insert(terminal, id);
+        let follow = self.directory_follow_setting(cx);
+        panel.update(cx, |panel, cx| panel.set_follow(follow, cx));
+        // Where the terminal is, rather than home, if its shell said.
+        self.follow_current_directory(terminal, window, cx);
+        Some(panel)
+    }
+
+    /// End a terminal's 文件 with the terminal. Its `Closed` does the rest,
+    /// as for an SFTP tab: its editors, its place in the registers.
+    fn close_file_sidebar(
+        &mut self,
+        terminal: RemoteTerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // It logs in nowhere, so no question of its own can be waiting.
+        if let Some(panel) = self.file_sidebar(terminal).cloned() {
+            panel.update(cx, |panel, cx| panel.close(window, cx));
+        }
     }
 
     pub fn local_terminal(&self, id: LocalTerminalId) -> Option<&Entity<LocalTerminalPanel>> {
@@ -827,7 +901,6 @@ impl Workspace {
             }
             ConnectionPromptKind::HostKeyChanged(prompt) => {
                 let old = prompt.old_fingerprints().join(&t!("common.list.separator"));
-                let path = prompt.known_hosts_path().display().to_string();
                 let description = introduced(
                     match prompt.jump_host() {
                         Some(jump_host) => t!(
@@ -837,8 +910,7 @@ impl Workspace {
                             port = prompt.port(),
                             algorithm = prompt.algorithm(),
                             old = old,
-                            fingerprint = prompt.fingerprint(),
-                            path = path
+                            fingerprint = prompt.fingerprint()
                         ),
                         None => t!(
                             "workspace.host_key.changed",
@@ -846,22 +918,32 @@ impl Workspace {
                             port = prompt.port(),
                             algorithm = prompt.algorithm(),
                             old = old,
-                            fingerprint = prompt.fingerprint(),
-                            path = path
+                            fingerprint = prompt.fingerprint()
                         ),
                     }
                     .to_string(),
                 );
+                // Updating is the risky answer: it trusts a key that may be
+                // someone posing as the server.
                 window.open_alert_dialog(cx, move |alert, _, _| {
                     alert
                         .title(t!("workspace.host_key.changed_title"))
                         .description(description.clone())
                         .button_props(
                             DialogButtonProps::default()
-                                .ok_text(t!("common.close"))
-                                .ok_variant(ButtonVariant::Danger),
+                                .ok_text(t!("workspace.host_key.update"))
+                                .ok_variant(ButtonVariant::Danger)
+                                .cancel_text(t!("common.cancel")),
                         )
+                        .show_cancel(true)
                         .on_ok({
+                            let answer = answer.clone();
+                            move |_, _, cx| {
+                                answer(ConnectionPromptReply::TrustAndSave, cx);
+                                true
+                            }
+                        })
+                        .on_cancel({
                             let answer = answer.clone();
                             move |_, _, cx| {
                                 answer(ConnectionPromptReply::Cancel, cx);
@@ -1154,7 +1236,8 @@ impl Workspace {
         // terminals: two directories of one host side by side.
         let id = ExplorerId(self.next_explorer_id);
         self.next_explorer_id += 1;
-        let (panel, subscription) = new_explorer_panel(self, id, host_id, window, cx);
+        let (panel, subscription) =
+            new_explorer_panel(self, id, host_id, SftpRoute::Login, window, cx);
         self._subscriptions.push(subscription);
         let focus = panel.read(cx).focus_handle(cx);
         self._subscriptions
@@ -1391,7 +1474,33 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(panel) = self.terminals.get(&action.0).cloned() {
+        self.close_terminal(action.0, true, window, cx);
+    }
+
+    /// Close a remote terminal tab, asking first while its 文件 transfers or
+    /// has files open with changes not saved yet, unless that was asked.
+    pub(super) fn close_terminal(
+        &mut self,
+        id: RemoteTerminalId,
+        ask_about_unsaved: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(&sidebar) = self.file_sidebars.get(&id)
+            && self.ask_before_closing(sidebar, ask_about_unsaved, true, window, cx)
+        {
+            return;
+        }
+        self.remove_terminal(id, window, cx);
+    }
+
+    fn remove_terminal(
+        &mut self,
+        id: RemoteTerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = self.terminals.get(&id).cloned() {
             self.dock_area
                 .update(cx, |area, cx| area.remove_panel(panel, window, cx));
         }
@@ -1415,57 +1524,90 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(panel) = self.explorers.get(&id).cloned() {
-            let generation = panel.read(cx).generation();
-            // Its remote files close with it: changes not saved yet would be
-            // lost, so the question names them.
-            let unsaved = if ask_about_unsaved {
-                self.unsaved_files(&self.editors_of(id, cx), cx)
-            } else {
-                Vec::new()
-            };
-            let unsaved = (!unsaved.is_empty()).then(|| {
-                t!(
-                    "workspace.unsaved.close_sftp",
-                    files = describe_files(&unsaved)
-                )
-                .to_string()
-            });
-            if panel.read(cx).is_transferring() {
-                let direction = panel.read(cx).transfer_direction();
-                confirm_close_transfer(
-                    id,
-                    generation,
-                    direction,
-                    unsaved,
-                    self.focus_handle.clone(),
-                    window,
-                    cx,
-                );
-            } else if let Some(unsaved) = unsaved {
-                let dispatch = self.focus_handle.clone();
-                confirm_danger(
-                    t!("workspace.unsaved.close_sftp_title"),
-                    Some(unsaved.into()),
-                    t!("workspace.unsaved.discard_and_close"),
-                    Rc::new(move |window, cx| {
-                        dispatch.dispatch_explorer_action(
-                            &ExplorerAction::new(id, ExplorerCommand::CloseConfirmed)
-                                .with_generation(generation),
-                            window,
-                            cx,
-                        )
-                    }),
-                    window,
-                    cx,
-                );
-            } else {
-                self.remove_explorer(id, window, cx);
-            }
+        if self.explorers.contains_key(&id)
+            && !self.ask_before_closing(id, ask_about_unsaved, false, window, cx)
+        {
+            self.remove_explorer(id, window, cx);
         }
     }
 
+    /// Ask before closing an explorer that transfers, or whose files have
+    /// changes not saved yet (unless that was asked already): an SFTP tab,
+    /// or a terminal's 文件 as the terminal closes. Confirming sends the
+    /// explorer `CloseConfirmed`. `false` when there is nothing to ask.
+    fn ask_before_closing(
+        &mut self,
+        id: ExplorerId,
+        ask_about_unsaved: bool,
+        terminal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(panel) = self.explorers.get(&id).cloned() else {
+            return false;
+        };
+        let generation = panel.read(cx).generation();
+        // Its remote files close with it: changes not saved yet would be
+        // lost, so the question names them.
+        let unsaved = if ask_about_unsaved {
+            self.unsaved_files(&self.editors_of(id, cx), cx)
+        } else {
+            Vec::new()
+        };
+        let unsaved = (!unsaved.is_empty()).then(|| {
+            let files = describe_files(&unsaved);
+            if terminal {
+                t!("workspace.unsaved.close_terminal", files = files)
+            } else {
+                t!("workspace.unsaved.close_sftp", files = files)
+            }
+            .to_string()
+        });
+        if panel.read(cx).is_transferring() {
+            let direction = panel.read(cx).transfer_direction();
+            confirm_close_transfer(
+                id,
+                generation,
+                direction,
+                unsaved,
+                self.focus_handle.clone(),
+                window,
+                cx,
+            );
+        } else if let Some(unsaved) = unsaved {
+            let dispatch = self.focus_handle.clone();
+            confirm_danger(
+                if terminal {
+                    t!("workspace.unsaved.close_terminal_title")
+                } else {
+                    t!("workspace.unsaved.close_sftp_title")
+                },
+                Some(unsaved.into()),
+                t!("workspace.unsaved.discard_and_close"),
+                Rc::new(move |window, cx| {
+                    dispatch.dispatch_explorer_action(
+                        &ExplorerAction::new(id, ExplorerCommand::CloseConfirmed)
+                            .with_generation(generation),
+                        window,
+                        cx,
+                    )
+                }),
+                window,
+                cx,
+            );
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Close an explorer the user agreed to close. A terminal's 文件 was
+    /// asked about as its terminal closed: the terminal goes, and it with it.
     fn remove_explorer(&mut self, id: ExplorerId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.sidebar_terminal(id) {
+            self.remove_terminal(terminal, window, cx);
+            return;
+        }
         if let Some(panel) = self.explorers.get(&id).cloned() {
             self.cancel_prompts_for_owner(
                 PromptOwner::Sftp(id, panel.read(cx).generation()),
@@ -1512,6 +1654,13 @@ impl Workspace {
                 TransferDirection::Upload => Counter::Upload,
                 TransferDirection::Download => Counter::Download,
             }),
+            // The sidebar's 文件 has no 查找文件 to count.
+            ExplorerCommand::FindFiles
+                if panel.read(cx).connection_state() == ConnectionState::Connected
+                    && !panel.read(cx).is_sidebar() =>
+            {
+                self.count(Counter::SftpFind)
+            }
             ExplorerCommand::Preview { remote, path } => {
                 if let Some((_, kind)) = panel.read(cx).preview_target(*remote, path.as_deref(), cx)
                 {
@@ -1782,6 +1931,17 @@ impl Workspace {
         }
     }
 
+    fn on_select_all_terminal(
+        &mut self,
+        _: &SelectAllTerminal,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(terminal) = self.active_terminal(cx) {
+            terminal.update(cx, |terminal, cx| terminal.select_all(cx));
+        }
+    }
+
     fn on_find_in_terminal(
         &mut self,
         _: &FindInTerminal,
@@ -1848,7 +2008,21 @@ impl Workspace {
         if let Some(terminal) = self.terminals.get(&id).cloned() {
             let host_id = terminal.read(cx).host_id();
             terminal.update(cx, |terminal, cx| terminal.disconnect(cx));
+            self.disconnect_file_sidebar(id, window, cx);
             self.refresh_host_connection_state(host_id, cx);
+        }
+    }
+
+    /// A terminal's 文件 goes down with it at once, rather than finding out
+    /// when its channel ends and then retrying for a while.
+    fn disconnect_file_sidebar(
+        &mut self,
+        terminal: RemoteTerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = self.file_sidebar(terminal).cloned() {
+            panel.update(cx, |panel, cx| panel.disconnect(window, cx));
         }
     }
 
@@ -1866,6 +2040,7 @@ impl Workspace {
         let terminals: Vec<_> = self.terminals_of(id, cx).cloned().collect();
         for terminal in terminals {
             terminal.update(cx, |terminal, cx| terminal.disconnect(cx));
+            self.disconnect_file_sidebar(terminal.read(cx).id(), window, cx);
         }
         for panel in self.explorers_of(id, cx) {
             panel.update(cx, |panel, cx| panel.disconnect(window, cx));
@@ -2202,25 +2377,28 @@ impl Workspace {
             .update(cx, |sidebar, cx| sidebar.focus_search(window, cx));
     }
 
-    fn set_font_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
-        // The base font is the interface zoom axis; it anchors the rem scale.
-        Theme::global_mut(cx).font_size = px(size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX));
-        Theme::sync_base(cx);
-        window.refresh();
+    /// The interface larger or smaller, through the settings (外观 › 界面字号),
+    /// which keep it in range and for the next launch; applying them sizes
+    /// the interface.
+    fn change_interface_font_size(&mut self, size: impl FnOnce(f32) -> f32, cx: &mut App) {
+        self.settings.update(cx, |store, cx| {
+            store.update(
+                |settings| settings.interface.font_size = size(settings.interface.font_size),
+                cx,
+            )
+        });
     }
 
-    fn on_zoom_in(&mut self, _: &ZoomIn, window: &mut Window, cx: &mut Context<Self>) {
-        let size = cx.theme().font_size.as_f32() + FONT_SIZE_STEP;
-        self.set_font_size(size, window, cx);
+    fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_interface_font_size(|size| size + INTERFACE_ZOOM_STEP, cx);
     }
 
-    fn on_zoom_out(&mut self, _: &ZoomOut, window: &mut Window, cx: &mut Context<Self>) {
-        let size = cx.theme().font_size.as_f32() - FONT_SIZE_STEP;
-        self.set_font_size(size, window, cx);
+    fn on_zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_interface_font_size(|size| size - INTERFACE_ZOOM_STEP, cx);
     }
 
-    fn on_zoom_reset(&mut self, _: &ZoomReset, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_font_size(FONT_SIZE_DEFAULT, window, cx);
+    fn on_zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_interface_font_size(|_| DEFAULT_INTERFACE_FONT_SIZE, cx);
     }
 
     /// The terminals' text a pixel larger or smaller, through the settings
@@ -2285,6 +2463,8 @@ fn new_terminal_panel(
             TerminalPanelEvent::Closed(terminal_id, host_id) => {
                 this.cancel_prompts_for_terminal(*terminal_id, window, cx);
                 this.terminals.remove(terminal_id);
+                this.close_file_sidebar(*terminal_id, window, cx);
+                this.directory_follow.remove(terminal_id);
                 if this.active_tab == Some(CenterTab::Terminal(*terminal_id)) {
                     this.set_active_tab(None, window, cx);
                 }
@@ -2301,7 +2481,32 @@ fn new_terminal_panel(
                 this.refresh_host_connection_state(*host_id, cx);
                 cx.notify();
             }
-            TerminalPanelEvent::Connected(_, host_id) => this.count_connection(*host_id, false, cx),
+            TerminalPanelEvent::Connected(terminal_id, host_id) => {
+                this.count_connection(*host_id, false, cx);
+                // A new connection, maybe to another machine: its folder is
+                // what it reports from now on, and it is checked afresh,
+                // first, so the check runs before 文件's channel opens.
+                if let Some(panel) = this.file_sidebar(*terminal_id).cloned() {
+                    panel.update(cx, |panel, _| panel.forget_follow_target());
+                }
+                if this.tool_showing(cx) == Some(ToolKind::Files)
+                    && this.tool_terminal(cx).map(|shown| shown.id) == Some(*terminal_id)
+                {
+                    this.check_directory_follow(*terminal_id, window, cx);
+                }
+                // 文件 comes back with its terminal: a channel on the new
+                // connection, whatever the old one's state.
+                if let Some(panel) = this.file_sidebar(*terminal_id).cloned()
+                    && panel.read(cx).can_reconnect()
+                {
+                    let id = panel.read(cx).id();
+                    this.on_explorer_action(
+                        &ExplorerAction::new(id, ExplorerCommand::Reconnect),
+                        window,
+                        cx,
+                    );
+                }
+            }
             TerminalPanelEvent::PromptRequested(terminal_id, host_id, prompt) => this
                 .enqueue_prompt(
                     PromptOwner::Terminal(*terminal_id),
@@ -2317,6 +2522,9 @@ fn new_terminal_panel(
             }
             TerminalPanelEvent::Notice(terminal_id, notice) => {
                 this.on_terminal_notice(CenterTab::Terminal(*terminal_id), notice, window, cx)
+            }
+            TerminalPanelEvent::DirectoryChanged(terminal_id, directory) => {
+                this.follow_directory(*terminal_id, directory, window, cx)
             }
         },
     );
@@ -2381,6 +2589,7 @@ fn new_explorer_panel(
     workspace: &Workspace,
     id: ExplorerId,
     host_id: HostId,
+    route: SftpRoute,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> (Entity<ExplorerPanel>, Subscription) {
@@ -2390,6 +2599,7 @@ fn new_explorer_panel(
             host_id,
             workspace.store.clone(),
             workspace.sftp_provider.clone(),
+            route,
             workspace.local_directory_provider.clone(),
             workspace.focus_handle.clone(),
             window,
@@ -2413,6 +2623,12 @@ fn new_explorer_panel(
                 if this.active_tab == Some(CenterTab::Explorer(*id)) {
                     this.set_active_tab(None, window, cx);
                 }
+                let sidebars = this.file_sidebars.len();
+                this.file_sidebars.retain(|_, sidebar| sidebar != id);
+                if this.file_sidebars.len() != sidebars {
+                    // The right sidebar lets go of it.
+                    this.sync_tool_sidebar(window, cx);
+                }
                 this.refresh_host_connection_state(*host_id, cx);
                 this.forget_unused_temporary_host(*host_id, window, cx);
             }
@@ -2424,9 +2640,11 @@ fn new_explorer_panel(
                         this.cancel_prompts_for_owner(owner,window,cx);
                     }
                 }
-                // Only connecting, connected and disconnected change it.
+                // Only connecting, connected and disconnected change it. A
+                // terminal's 文件 logs in nowhere: `tool_files` counts it.
                 if this.explorers.get(id).is_some_and(|panel| {
-                    panel.read(cx).connection_state() == ConnectionState::Connected
+                    let panel = panel.read(cx);
+                    panel.connection_state() == ConnectionState::Connected && !panel.is_sidebar()
                 }) {
                     this.count_connection(*host_id, true, cx);
                 }
@@ -2605,6 +2823,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_restart_local_terminal))
             .on_action(cx.listener(Self::on_copy_terminal))
             .on_action(cx.listener(Self::on_paste_terminal))
+            .on_action(cx.listener(Self::on_select_all_terminal))
             .on_action(cx.listener(Self::on_find_in_terminal))
             .on_action(cx.listener(Self::on_find_next_in_terminal))
             .on_action(cx.listener(Self::on_find_previous_in_terminal))
@@ -2613,6 +2832,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_host_panel))
             .on_action(cx.listener(Self::on_toggle_tool_sidebar))
             .on_action(cx.listener(Self::on_toggle_tool))
+            .on_action(cx.listener(Self::on_refresh_gpu))
+            .on_action(cx.listener(Self::on_toggle_gpu_device))
+            .on_action(cx.listener(Self::on_toggle_all_gpu_devices))
+            .on_action(cx.listener(Self::on_toggle_directory_follow))
+            .on_action(cx.listener(Self::on_install_directory_follow))
             .on_action(cx.listener(Self::on_toggle_monitor_detail))
             .on_action(cx.listener(Self::on_refresh_connections))
             .on_action(cx.listener(Self::on_refresh_processes))

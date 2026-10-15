@@ -366,7 +366,6 @@ fn render_system(system: &SystemInfo, uptime: Option<Duration>, cx: &App) -> imp
                     .test_support()
                     .aria_label(value.clone())
                     .text_sm()
-                    .truncate()
                     .child(value),
             )
     };
@@ -469,7 +468,6 @@ fn render_cpu(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .truncate()
                     .child(model),
             )
         })
@@ -737,12 +735,7 @@ fn render_disks(disks: &[DiskUsage], cx: &App) -> impl IntoElement {
                 h_flex()
                     .gap_3()
                     .text_sm()
-                    .child(
-                        numeric(disk.mount.clone(), cx)
-                            .flex_1()
-                            .min_w_0()
-                            .truncate(),
-                    )
+                    .child(numeric(disk.mount.clone(), cx).flex_1().min_w_0())
                     .child(
                         numeric(format_percent(percent), cx)
                             .flex_shrink_0()

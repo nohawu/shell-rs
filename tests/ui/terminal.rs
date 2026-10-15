@@ -2,6 +2,7 @@
 //! the font and the size, links, the mouse for programs and their copies.
 
 use crate::support::*;
+use shellrs::app::{CopyTerminal, SelectAllTerminal};
 use shellrs::terminal::RightClick;
 
 fn open_workspace_with_factory(
@@ -74,6 +75,12 @@ async fn creates_independent_local_terminals_from_button_and_shortcut(cx: &mut T
         window.render_frame(cx);
         assert!(window.find(("local-terminal", 1_u64)).visible());
         assert_eq!(window.find(("local-terminal", 1_u64)).focused(), Some(true));
+        assert!(
+            window
+                .within(("local-terminal-tab", 1_u64))
+                .try_find("connection-status")
+                .is_none()
+        );
         #[cfg(target_os = "macos")]
         window.press("cmd-t", cx);
         #[cfg(not(target_os = "macos"))]
@@ -161,7 +168,7 @@ async fn local_terminals_run_the_shell_the_settings_name(cx: &mut TestAppContext
     // Tall enough for the whole of 终端, whose groups the page's list
     // draws only near the view.
     let (handle, workspace) =
-        open_workspace_with_local_terminals(cx, local.clone(), size(px(1280.), px(1600.)));
+        open_workspace_with_local_terminals(cx, local.clone(), size(px(1280.), px(2400.)));
     let settings = cx.update(|cx| workspace.read(cx).settings().clone());
 
     // Until one is named, the system's default shell.
@@ -249,6 +256,14 @@ async fn exited_local_terminal_keeps_its_tab_and_restarts_fresh(cx: &mut TestApp
         window.render_frame(cx);
         assert!(window.find(("local-terminal", 1_u64)).visible());
         assert!(window.find(("local-terminal-exit", 1_u64)).visible());
+        window.click(("local-terminal", 1_u64), cx);
+        window.press("enter", cx);
+        assert_eq!(
+            factory.starts(),
+            1,
+            "local shells do not opt into SSH reconnect"
+        );
+        assert!(!local_screen(&workspace, cx).contains("按 Enter 重新连接"));
         cx.write_to_clipboard(ClipboardItem::new_string("退出后不可粘贴".into()));
         #[cfg(target_os = "macos")]
         window.press("cmd-v", cx);
@@ -504,6 +519,86 @@ async fn copy_on_select_puts_what_the_mouse_selects_on_the_clipboard(cx: &mut Te
             Some("run:1$ alpha.txt 会议纪要.md".into())
         );
     });
+}
+
+/// 全选 takes the scrollback too, without the blank lines below the text.
+/// It only selects; with 选中复制 on, selecting is copying.
+#[gpui_kit::test]
+async fn select_all_takes_the_scrollback_too(cx: &mut TestAppContext) {
+    let lines: Vec<String> = (1..=80).map(|line| format!("第 {line} 行")).collect();
+    let printed: &'static str = Box::leak(format!("{}\r\n", lines.join("\r\n")).into_boxed_str());
+    let (handle, workspace, _) = terminal_printing(cx, printed, "第 80 行").await;
+    assert!(
+        !cx.update(|cx| local_screen(&workspace, cx))
+            .contains("第 1 行")
+    );
+    let everything = format!("run:1$ alpha.txt 会议纪要.md\n{}", lines.join("\n"));
+    let clipboard = |cx: &mut TestAppContext| {
+        cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    };
+    let dispatch = |cx: &mut TestAppContext, action: Box<dyn gpui_kit::Action>| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(action, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+
+    cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("原剪贴板".into())));
+    dispatch(cx, Box::new(SelectAllTerminal));
+    assert_eq!(clipboard(cx).as_deref(), Some("原剪贴板"));
+    dispatch(cx, Box::new(CopyTerminal));
+    assert_eq!(clipboard(cx), Some(everything.clone()));
+
+    let settings = cx.update(|cx| workspace.read(cx).settings().clone());
+    cx.update(|cx| {
+        settings.update(cx, |settings, cx| {
+            settings.update(
+                |settings| settings.terminal_interaction.copy_on_select = true,
+                cx,
+            )
+        });
+        cx.write_to_clipboard(ClipboardItem::new_string("原剪贴板".into()));
+    });
+    dispatch(cx, Box::new(SelectAllTerminal));
+    assert_eq!(clipboard(cx), Some(everything));
+}
+
+/// Below 复制, a remote terminal's menu copies its host's address and ID.
+#[gpui_kit::test]
+async fn a_remote_terminals_menu_copies_the_host_address_and_id(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let public_id = workspace.read_with(cx, |workspace, cx| {
+        let store = workspace.store().read(cx);
+        store.host(HostId(WEB_01)).unwrap().public_id.to_string()
+    });
+    let pick = |cx: &mut TestAppContext, item: usize| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.right_click(("terminal", INITIAL_WEB_TERMINAL), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let mut popup = window.within("popup-menu");
+            let labels: Vec<_> = (0..5_usize)
+                .map(|item| popup.find(item).label().map(str::to_owned))
+                .collect();
+            assert_eq!(
+                labels,
+                ["复制", "复制 IP", "复制 ID", "粘贴", "全选"].map(|label| Some(label.to_owned()))
+            );
+            popup.click(item, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    };
+
+    assert_eq!(pick(cx, 1).as_deref(), Some("10.0.1.12"));
+    assert_eq!(pick(cx, 2), Some(public_id));
 }
 
 #[gpui_kit::test]
@@ -1046,6 +1141,22 @@ async fn links_open_with_the_command_key_and_show_where_they_lead(cx: &mut TestA
     assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/docs"));
 }
 
+/// A program that asks for the background and then for the cursor, as
+/// termenv does (ollama), hears the answers in that order: it takes a
+/// cursor report coming first to mean no color is coming, and the color
+/// that comes after would reach the shell as typed text.
+#[gpui_kit::test]
+async fn a_program_hears_its_queries_answered_in_the_order_asked(cx: &mut TestAppContext) {
+    let (handle, _, factory) = terminal_printing(cx, "\x1b]11;?\x1b\\\x1b[6nasked", "asked").await;
+    cx.wait_for(handle.into(), Duration::from_secs(2), |_, _| {
+        factory.written_text().contains('R')
+    })
+    .await;
+    let written = factory.written_text();
+    assert!(written.starts_with("\x1b]11;rgb:"), "{written:?}");
+    assert!(written.ends_with("\x1b\\\x1b[2;1R"), "{written:?}");
+}
+
 /// Wait until the fake shell has been sent `expected`, which it records on
 /// its own thread, and forget it.
 async fn take_written(
@@ -1113,6 +1224,117 @@ async fn the_scrollbar_scrolls_back_through_the_history(cx: &mut TestAppContext)
     let lines = screen(cx);
     assert!(lines.lines().any(|line| line == "line 1"), "{lines}");
     assert!(!lines.contains("end"), "{lines}");
+}
+
+/// A selection dragged past the bottom takes the view down with it, step
+/// by step while the pointer stays out there, as in every editor; the wheel
+/// turned while dragging does the same. It stops once let go.
+#[gpui_kit::test]
+async fn a_selection_dragged_past_the_edge_scrolls_on(cx: &mut TestAppContext) {
+    use gpui_kit::{MouseDownEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent, TouchPhase};
+
+    let text: String = (1..=200).map(|line| format!("line {line}\r\n")).collect();
+    let (handle, workspace, _) = terminal_printing(cx, String::leak(text + "end"), "end").await;
+    let screen = |cx: &mut TestAppContext| cx.read(|cx| local_screen(&workspace, cx));
+    // The topmost numbered line on screen; the oldest line is the prompt.
+    let first_line = |cx: &mut TestAppContext| {
+        screen(cx).lines().find_map(|line| {
+            line.strip_prefix("line ")
+                .and_then(|number| number.trim().parse::<usize>().ok())
+        })
+    };
+
+    // To the oldest line, then press at the start of it.
+    let terminal = cx
+        .update_window(handle.into(), |_, window, _| {
+            window.find(("local-terminal", 1_u64)).bounds()
+        })
+        .unwrap();
+    in_frame(cx, handle, |window, cx| {
+        let top = point(terminal.right() + px(2.), terminal.top() + px(2.));
+        click_at(window, top, gpui_kit::Modifiers::none(), cx);
+    });
+    assert_eq!(first_line(cx), Some(1));
+    let start = point(terminal.left() + px(1.), terminal.top() + px(4.));
+    let below = point(terminal.left() + px(40.), terminal.bottom() + px(30.));
+    in_frame(cx, handle, |window, cx| {
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position: start,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            MouseMoveEvent {
+                position: below,
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Default::default(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+    });
+
+    // Held out there, it goes on scrolling down.
+    for _ in 0..5 {
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+    }
+    let scrolled = first_line(cx).expect("still in the history");
+    assert!(scrolled > 5, "scrolled to line {scrolled}");
+
+    // The wheel, still dragging, takes it further.
+    in_frame(cx, handle, |window, cx| {
+        window.dispatch_event(
+            ScrollWheelEvent {
+                position: point(terminal.left() + px(40.), terminal.bottom() - px(4.)),
+                delta: ScrollDelta::Lines(point(0., -5.)),
+                modifiers: Default::default(),
+                touch_phase: TouchPhase::Moved,
+            }
+            .to_platform_input(),
+            cx,
+        );
+    });
+    let wheeled = first_line(cx).expect("still in the history");
+    assert!(wheeled > scrolled, "{wheeled} after {scrolled}");
+
+    // Let go: what was selected runs from line 1 to the bottom of the view,
+    // and nothing scrolls any more.
+    in_frame(cx, handle, |window, cx| {
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position: below,
+                modifiers: Default::default(),
+                click_count: 1,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_action(Box::new(CopyTerminal), cx);
+    });
+    let copied = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .expect("a selection");
+    assert!(copied.starts_with("run:1$"), "from the first row: {copied}");
+    assert!(copied.contains("\nline 1\nline 2\n"), "{copied}");
+    // Down to the bottom row, as far across as the pointer.
+    let last = screen(cx).lines().last().unwrap_or_default().to_string();
+    let end = copied.lines().last().unwrap_or_default();
+    assert!(
+        !end.is_empty() && last.starts_with(end),
+        "{end:?} of {last:?}"
+    );
+    let settled = first_line(cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    cx.run_until_parked();
+    assert_eq!(first_line(cx), settled);
 }
 
 #[gpui_kit::test]

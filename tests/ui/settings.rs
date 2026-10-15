@@ -112,15 +112,8 @@ fn settings_open_from_the_host_list_as_one_tab(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(window.find("settings").visible());
         assert_eq!(window.find("settings").focused(), Some(true));
-        // ⌘W closes it like any other tab.
-        window.press(
-            if cfg!(target_os = "macos") {
-                "cmd-w"
-            } else {
-                "ctrl-w"
-            },
-            cx,
-        );
+        // The platform close shortcut closes it like any other tab.
+        window.press("secondary-w", cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -136,7 +129,7 @@ fn settings_open_from_the_host_list_as_one_tab(cx: &mut TestAppContext) {
 
 /// The label of one dropdown in the 外观 page's 常规 group. `Settings` names
 /// its groups, items and dropdown buttons by position.
-/// Open the settings tab on 外部 CLI, the fifth category.
+/// Open the settings tab on 外部 CLI, the sixth category.
 fn open_external_cli_settings(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
@@ -146,7 +139,7 @@ fn open_external_cli_settings(cx: &mut TestAppContext, handle: WindowHandle<Root
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.within("settings").click("0-4", cx);
+        window.within("settings").click("0-5", cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -463,7 +456,7 @@ fn the_window_settings_are_on_until_turned_off(cx: &mut TestAppContext) {
     in_frame(cx, handle, |window, cx| window.click("open-settings", cx));
     // 应用 comes right before 关于.
     in_frame(cx, handle, |window, cx| {
-        window.within("settings").click("0-5", cx)
+        window.within("settings").click("0-6", cx)
     });
     let switch = |item: usize| {
         move |window: &mut gpui_kit::Window| {
@@ -486,6 +479,71 @@ fn the_window_settings_are_on_until_turned_off(cx: &mut TestAppContext) {
     });
     let settings = window(cx);
     assert!(settings.remember_size && !settings.remember_position);
+}
+
+/// 外观 › 常规 › 界面字号: gpui-kit's 16, marked as the default, until
+/// changed; a change sizes the interface at once.
+#[gpui_kit::test]
+fn the_interface_font_size_is_set_on_the_appearance_page(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    in_frame(cx, handle, |window, cx| window.click("open-settings", cx));
+    // 外观 is the first category.
+    in_frame(cx, handle, |window, cx| {
+        window.within("settings").click("0-0", cx)
+    });
+    in_frame(cx, handle, |window, _| {
+        assert_eq!(
+            appearance_dropdown(window, 2).as_deref(),
+            Some("16（默认）")
+        )
+    });
+    cx.update(|cx| assert_eq!(cx.theme().font_size.as_f32(), 16.));
+
+    let settings = cx.update(|cx| workspace.read(cx).settings().clone());
+    cx.update(|cx| {
+        settings.update(cx, |settings, cx| {
+            settings.update(|settings| settings.interface.font_size = 14., cx)
+        })
+    });
+    cx.run_until_parked();
+    in_frame(cx, handle, |window, _| {
+        assert_eq!(appearance_dropdown(window, 2).as_deref(), Some("14"))
+    });
+    cx.update(|cx| assert_eq!(cx.theme().font_size.as_f32(), 14.));
+}
+
+/// 设置 › SFTP › 传输: 最大同时传输数量 shows three, marked as the default,
+/// and then what the settings hold.
+#[gpui_kit::test]
+fn the_sftp_page_says_how_many_files_move_at_once(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    in_frame(cx, handle, |window, cx| window.click("open-settings", cx));
+    // SFTP comes right after 终端.
+    in_frame(cx, handle, |window, cx| {
+        window.within("settings").click("0-2", cx)
+    });
+    let shown = |window: &mut gpui_kit::Window| {
+        window
+            .within("settings")
+            .within("group-0")
+            .within("item-0")
+            .find("btn")
+            .label()
+            .map(str::to_string)
+    };
+    in_frame(cx, handle, |window, _| {
+        assert_eq!(shown(window).as_deref(), Some("3（默认）"))
+    });
+    let settings = cx.update(|cx| workspace.read(cx).settings().clone());
+    cx.update(|cx| {
+        settings.update(cx, |settings, cx| {
+            settings.update(|settings| settings.transfers.parallel = 5, cx)
+        })
+    });
+    cx.run_until_parked();
+    in_frame(cx, handle, |window, _| {
+        assert_eq!(shown(window).as_deref(), Some("5"))
+    });
 }
 
 /// The 关键字高亮 rules, as the settings hold them.
@@ -531,10 +589,10 @@ async fn highlight_rules_are_edited_in_place_on_their_page(cx: &mut TestAppConte
 
     let (handle, workspace) = open_workspace(cx);
     in_frame(cx, handle, |window, cx| window.click("open-settings", cx));
-    // 关键字高亮 comes right after 终端, with the examples a new
+    // 关键字高亮 comes after 终端 and SFTP, with the examples a new
     // installation starts with: rows 0 to 2.
     in_frame(cx, handle, |window, cx| {
-        window.within("settings").click("0-2", cx)
+        window.within("settings").click("0-3", cx)
     });
     let ip = r"\b\d{1,3}(\.\d{1,3}){3}\b";
     assert_eq!(
@@ -586,14 +644,7 @@ async fn highlight_rules_are_edited_in_place_on_their_page(cx: &mut TestAppConte
             window.find(("highlight-rule-error", 3usize)).label(),
             Some("正则表达式写法有误")
         );
-        window.press(
-            if cfg!(target_os = "macos") {
-                "cmd-a"
-            } else {
-                "ctrl-a"
-            },
-            cx,
-        );
+        window.press("secondary-a", cx);
         window.input(r"OutOfMemory\w*", cx);
     });
     in_frame(cx, handle, |window, cx| {
@@ -601,14 +652,7 @@ async fn highlight_rules_are_edited_in_place_on_their_page(cx: &mut TestAppConte
         window.click(("highlight-rule-note", 3usize), cx);
         window.input("内存溢出", cx);
         window.click(("highlight-rule-color", 3usize), cx);
-        window.press(
-            if cfg!(target_os = "macos") {
-                "cmd-a"
-            } else {
-                "ctrl-a"
-            },
-            cx,
-        );
+        window.press("secondary-a", cx);
         window.input("#D946EF", cx);
         window.click(("highlight-rule-notify", 3usize), cx);
         window.click(("highlight-rule-enabled", 0usize), cx);

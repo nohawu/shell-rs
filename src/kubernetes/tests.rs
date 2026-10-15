@@ -685,6 +685,26 @@ fn cluster_queries_omit_namespace_and_secret_queries_only_request_metadata() {
     assert_eq!(secret[0].name, "token");
 }
 
+#[test]
+fn secret_details_do_not_display_data_embedded_in_last_applied_annotations() {
+    let metadata = json!([{"name":"token", "namespace":"production", "uid":"secret-uid",
+        "resourceVersion":"7", "annotations":{"note":"metadata", "kubectl.kubernetes.io/last-applied-configuration":"{\"data\":{\"password\":\"hidden\"}}"},
+        "managedFields":[{"manager":"kubectl"}]}]);
+    let value = model::secret_detail(&metadata).unwrap();
+    assert_eq!(value["metadata"]["uid"], "secret-uid");
+    assert_eq!(value["metadata"]["annotations"]["note"], "metadata");
+    assert!(value["metadata"].get("managedFields").is_none());
+    assert!(
+        value["metadata"]["annotations"]
+            .get("kubectl.kubernetes.io/last-applied-configuration")
+            .is_none()
+    );
+    assert!(!super::mutation::yaml(&value).unwrap().contains("hidden"));
+    for malformed in [json!([]), json!([null]), json!({})] {
+        assert!(model::secret_detail(&malformed).is_err());
+    }
+}
+
 fn pod() -> Resource {
     Resource {
         kind: ResourceKind::Pod,

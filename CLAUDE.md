@@ -8,7 +8,7 @@ ShellRS（crate 与二进制都叫 `shellrs`）是 Xshell / WinSCP 式的 SSH �
 
 - **术语。** 保存的一项叫「主机」（量词「台」），代码和库里叫 host（`Host`、`HostId`、`HostStore`、`hosts` 表）。它以前叫「会话」/ `Session`，已全部改掉，新代码和文案别再用。填 IP / 域名的字段叫「地址」（`Host.address`）。SSH 协议层的 session（「SSH 会话通道」、russh 的 `Session`、SFTP 会话）照旧。英文用词见「多语言」的用词表。
 - **两种不保存的连接。** 「外部连接」：堡垒机像调 Xshell（`ssh://`、`-url`）或 WinSCP（`sftp://`）一样拉起 ShellRS，只开一个终端或 SFTP 标签（`HostStore::is_external`）。「临时连接」：标题栏「临时连接…」打开，功能齐全。两者共同的「不保存」在代码里叫 temporary（`HostInfo::temporary`）。
-- **全是真的。** SQLite（`~/Library/Application Support/shellrs/shellrs.db`，`SHELLRS_DATA_DIR` 可覆盖目录）、本地终端（`portable-pty` + `alacritty_terminal`）、SSH（`russh`）、SFTP（双栏、传输队列、断点续传）、端口转发（`-L` / `-R` / `-D`）、凭据、连接方式（直连、多级跳板、HTTP / SOCKS5 代理）、右侧栏八个工具、内置编辑器和预览、外部 CLI、在线升级、匿名使用统计（Aptabase）。密码和口令只进系统钥匙串（`keyring`），**数据库里永远不出现秘密**。
+- **全是真的。** SQLite（`~/Library/Application Support/shellrs/shellrs.db`，`SHELLRS_DATA_DIR` 可覆盖目录）、本地终端（`portable-pty` + `alacritty_terminal`）、SSH（`russh`）、SFTP（双栏、传输队列、断点续传）、端口转发（`-L` / `-R` / `-D`）、凭据、连接方式（直连、多级跳板、HTTP / SOCKS5 代理）、右侧栏十个工具、内置编辑器和预览、外部 CLI、在线升级、匿名使用统计（Aptabase）。密码和口令只进系统钥匙串（`keyring`），**数据库里永远不出现秘密**。
 
 做 UI 之前先读 `gpui-kit` 与 `gpui-kit-design-guides` 两个技能（其中的 Coding Guides 和 Design Guides 在本仓库是规范，不是参考）。不要凭记忆臆造 gpui-kit API：以 `~/.cargo/registry/src/*/gpui-component-0.6.1/`、`gpui-base-0.6.1/` 的源码或 `https://gpui-kit.com/component/<name>.md` 为准。
 
@@ -17,7 +17,7 @@ ShellRS（crate 与二进制都叫 `shellrs`）是 Xshell / WinSCP 式的 SSH �
 用户定过的事，不要改回去。细节以 `docs/manual.md` 和代码为准。
 
 - **界面语言**：「设置 › 外观 › 界面语言」有跟随系统（默认：中文系统用简体中文，其余用英文，系统没说时用中文）、简体中文、English。改了立刻生效，不用重启。老用户的 settings.json 里已存着 `zh-CN`，不迁移。框架用 gpui-kit 自带的 `rust-i18n`，不另引 Fluent 之类。
-- **SFTP**：Dock 标签，每次「打开 SFTP」新开一个、各自连接。操作对标 WinSCP Commander：两行工具栏、路径标签、WinSCP 的列、高亮多选、「名称」格才是项目、框选。本地侧与远程侧对称，本地删除进废纸篓；书签按主机、按侧持久化。传输进行中还能再发起，新批次在标签底部的传输队列里排队，不做前台进度对话框。大小列默认整 KB，右键列标题可切换。「显示隐藏文件」（`.` 开头的）本地、远程各一个开关、互不影响，每侧对所有标签生效，存进设置，默认不显示；工具栏用睁眼 / 闭眼两个图标表示状态，不用选中效果；显示时隐藏文件的文字浅一些。SFTP 标签暂不做目录同步（外部 CLI 有 `shellrs sync`）、过滤、查找、目录树和 Dock 布局持久化。
+- **SFTP**：Dock 标签，每次「打开 SFTP」新开一个、各自连接。操作对标 WinSCP Commander：两行工具栏、路径标签、WinSCP 的列、高亮多选、「名称」格才是项目、框选。本地侧与远程侧对称，本地删除进废纸篓；书签按主机、按侧持久化。传输进行中还能再发起，新批次在标签底部的传输队列里排队，不做前台进度对话框。传输逻辑按 WinSCP（用户反馈小文件太慢后定的）：一批里同时传的文件数是「设置 › SFTP › 传输 › 最大同时传输数量」（默认 3，可选 1–10），文件夹里的等文件夹建好；但走标签的同一条 SFTP 会话，不像 WinSCP 另开连接（不另登录，堡垒机上也能用）。小于 100 KB 的不走 `.filepart`、不续传（WinSCP 默认的 100 KB）。大小列默认整 KB，右键列标题可切换。「显示隐藏文件」（`.` 开头的）本地、远程各一个开关、互不影响，每侧对所有标签生效，存进设置，默认不显示；工具栏用睁眼 / 闭眼两个图标表示状态，不用选中效果；显示时隐藏文件的文字浅一些。文件图标默认单色（gpui-kit 规范：一个产品一套图标）；用户反馈后加了「设置 › SFTP › 图标风格」可换彩色（对标 WinSCP / Xftp），只管文件列表和传输确认框里的文件图标，工具栏、路径标签不变。彩色取自 Material Icon Theme（MIT），只带服务器、项目、主目录常见的约 160 个，普通文件夹改成黄色（它本身的蓝灰太像单色）；Linux 的 `/dev`、`/media` 不按它的项目含义配图标。「查找文件」只在远程侧（同 WinSCP，工具栏、空白处菜单、⌘F）：逐层发普通的 `List`（同时 4 个）。用户要求和 WinSCP 一致：掩码匹配整个名称（不带通配符也不是「包含」），普通掩码只找文件、以 `/` 结尾的找文件夹；进入链接到目录的符号链接，按 `List` 返回的真实路径防循环；不跳过 `/proc` 之类，没有数量上限。只有隐藏文件跟远程侧的「显示隐藏文件」走。它是单独的普通窗口（同 WinSCP，可以被主窗口盖住），不用 gpui-kit 的对话框（那只能是模态的）：每个 SFTP 标签最多一个，定位、编辑、下载把主窗口切到前面、查找窗口留着；关窗口就停止查找、丢掉结果，只记住上次的文件名。结果的排序、多选、框选和键同主窗口的文件列表（`Selection` 按路径、点标题循环排序、文件夹在前、「名称」格才是结果，指针处理和框选与文件面板共用 `marquee.rs`）；右键菜单就是下方那几个按钮（空白处只有「复制结果」），菜单项派发的是文件列表的 `ExplorerShortcut`，由查找窗口自己处理；下载、删除作用于所有选中的，删除在查找窗口里确认，经标签的 `DeletePaths` 执行，完成后标签把结果告诉窗口。SFTP 标签暂不做目录同步（外部 CLI 有 `shellrs sync`）、过滤、目录树和 Dock 布局持久化。
 - **主机树**：搜索匹配主机（名称、地址、用户）和分组名；分组名匹配时列出整个分组，回车只连本身匹配的第一台主机（按树的顺序）。首次启动是空库；分组可任意嵌套，主机可以不属于分组；删除分组连同子分组和主机，确认框写明数量。
 - **主机对话框**：
   - 认证方式三选一：「密码」（留空就每次连接时询问，不悄悄试密钥）、「使用凭据」、「无密码」（依次试服务器免认证、SSH Agent、`~/.ssh` 默认私钥，服务器要密码就报错、不询问）。主机自己没有私钥文件，要用私钥就建密钥凭据。
@@ -49,15 +49,25 @@ ShellRS（crate 与二进制都叫 `shellrs`）是 Xshell / WinSCP 式的 SSH �
 - **右侧栏**：窗口最右一列竖排的工具切换。
   - 显示规则：只跟着 SSH 远程终端出现，SFTP、本地终端、设置、开始页都不显示。它是工作区级的一份，开合和所选工具在所有终端间共用。默认收起，宽 320 px，只能往宽里拉。⌘⌥B / Ctrl+Alt+B 切换。
   - 中间区分屏时不隐藏：跟着最近一次在前（切到或焦点点进）、而且还在屏幕上的远程终端；点进另一半的 SFTP、本地终端等不换；屏幕上一个远程终端都没有才隐藏。标题写出主机（「系统监控 · web-01」），状态栏也跟焦点走。用户比较过「分屏就隐藏」，选了这个。
-  - 工具从上到下：命令片段、历史命令、Docker、Kubernetes、系统服务、进程管理、网络连接、系统监控。
-  - Kubernetes 通过 SSH 主机上的 kubectl 和 kubeconfig 查询 context、全部 namespace、资源详情与容器日志；所有查询显式指定 context 和命名空间，命令只生成并复制，不直接执行。状态用主题色标签、JSON 用只读 Editor、字段可复制；日志按级别 / 时间戳 / JSON 高亮，以虚拟列表显示，实时预览每 2 秒串行读取最新窗口，缓冲上限 512 KB / 10000 行，离开日志页或关闭详情即停止。模块与测试见 `docs/kubernetes.md`。
-  - 已知不是 Linux 的主机不显示系统监控、网络连接、进程管理、系统服务；已知是 Windows 的再去掉 Docker 和历史命令；外部连接只有命令片段。
+  - Kubernetes 使用 SSH 主机上的 kubectl 和 kubeconfig，提供资源、关系、日志、性能与经确认的 YAML 编辑、重启和删除；惰性创建，开关统一使用侧栏功能。查询取消、命令边界与测试见 `docs/kubernetes.md`。
+  - 工具从上到下：命令片段、历史命令、文件、Docker、Kubernetes、系统服务、进程管理、网络连接、系统监控、GPU/NPU（「文件」排在历史命令之后，用户定的）。
+  - 「设置 › 终端 › 侧栏功能」（在「终端交互」和「通知」之间，用户定的）是两排图标（`settings/sidebar_tools.rs`）：上排显示、下排不显示，图标下写名称，点击或拖到另一排就切换，悬停显示用途（用户嫌复选框不好使）。GPU/NPU 默认不显示（不是每台机器都有卡），Kubernetes 默认显示，也在这里切换。`settings.json` 的 `sidebar_tools` 只存和默认不同的（`ToolKind::key`，发布后不能改），新工具自带默认值、不用迁移。组内「恢复默认」只管这一组（gpui-kit 只有整页重置）。只在设置里改：图标列的右键勾选菜单做过又去掉了（用户嫌意义不大、增加复杂度），别加回来。全部隐藏时图标列整个消失，只能回设置。过滤只在 `offered_tools`，设置变了要 `sync_tool_sidebar`。
+  - 已知不是 Linux 的主机不显示系统监控、GPU/NPU、网络连接、进程管理、系统服务；已知是 Windows 的再去掉 Docker、Kubernetes 和历史命令；外部连接只有命令片段。
   - 系统监控每 2 秒读一次（运行时长随读数刷新，不自己走），磁盘每 30 秒，只在显示时读。≥ 70% 黄、≥ 90% 红。
+  - GPU/NPU（用户要的 AI 主机显卡运维，没合并 PR #19 塞进系统监控的做法）：NVIDIA 读 `nvidia-smi` 的 CSV 查询和计算进程，华为昇腾解析 `npu-smi info` 的表格，其他厂商暂不支持；`ps` 补进程的用户和命令行。按 8 卡设计：汇总（显存写占用比例、下面一行已用 / 总量，半格放不下几百 GB）、每卡三行（利用率、显存各一行，名称和数值定宽，两根条一样长；点开看详情，「全部展开 / 全部收起」，只有一张卡时默认展开）、计算进程（右键结束，沿用进程管理的 `EndProcess`）。读完 2 秒后再读；运行时长在同一个脚本里读 `/proc/uptime`，随读数 2 秒一跳、不自己走（用户定的，同系统监控）；刷新按钮只在点了刷新时转（每 2 秒转一次用户嫌过度）。每个工具 `timeout -s KILL 3`；读失败或被停掉就停止自动读取，点刷新再读（卡掉了时 `nvidia-smi` 会卡在驱动里，一直重试会堆积进程）。利用率和显存不变色（跑满、预占显存是常态），只有温度（≥ 80 °C 黄、≥ 90 °C 红）和健康状态（ECC 不可纠正错误、昇腾 Health 不是 OK）上色。昇腾的解析只按公开样例写，没在真机上验证过。
+  - 放不下的文字：型号、驱动、UUID、系统名这类说明性的字段折行显示，不截断（GPUI 会把过长的串按字符折开）；只有密集列表里的长文本（进程命令行、行里的型号）截断，鼠标停上去显示全文（用户问过，定的这条）。
   - 网络连接、系统服务、Docker、历史命令的列表不自己刷新：打开、换终端、点刷新、执行命令之后才读。进程管理每 15 秒读一次。
   - 结束进程，停止 / 重启服务，停止 / 重启 / 删除容器都先确认。不是 root 时用 `sudo -n`，要密码就报「需要 root 权限…」。
   - 系统服务和 Docker 的标签都用 gpui-kit 的下划线 `TabBar`：每个标签按文字和数量的宽度排，放不下时横向滚动，不截断。均分放不下「已停止 202」，英文的 "Containers 12" 也放不下，不管什么语言都这样。
   - 历史命令读主机的 `~/.bash_history`，不自己记录；点一条是放进输入行、不执行，另有执行按钮。
   - 命令片段所有主机共用（库里预留了「适用范围」列）；「点击时自动执行」新建时默认勾上；执行按钮鼠标移上去才出现，位置一直留着。
+  - 「文件」是单栏的远程文件列表（`ExplorerPanel` 的侧栏模式），SFTP 开在**终端自己的连接**上（`TerminalTransportCommand::OpenSftp`），不另登录、不问密码。用户定的简化方案（不合并 PR #18 的每主机隐藏连接、配置变化冻结、临时主机升级成标签）：
+    - 每个终端一份，第一次显示时才建，之后一直留着（换工具、收起都不断）；终端断开它就断开，终端重连它跟着重连；随终端关闭，有传输或未保存的编辑器先问（同关 SFTP 标签）。
+    - 只有远程面板：列只有名称和大小，行不能拖出（拖到别的 SFTP 标签的本地面板会从那台主机下载）；没有目录列表和查找文件（定位要聚焦看不见的面板）；工具栏多一个「上传…」。上传、下载沿用 SFTP 标签的确认框（用户定的），下载目标默认「下载」文件夹；隐藏的本地面板只当下载目标，从不列目录（macOS 读「下载」会弹授权框）。队列按行叠放，没有列标题。
+    - 不往共用的面板菜单里加项，双栏 SFTP 标签不受影响。传输和终端共用一条连接，大文件会拖慢终端，手册里建议用 SFTP 标签。
+    - 目录跟随（用户定的 Termark 式流程，没用 PR #22 的替换登录 shell）：靠远端 shell 每次出提示符报告 OSC 7。「设置 › SFTP › 文件侧栏 › 自动检测目录配置」默认开：显示「文件」时在终端连接上跑一次检测（每个连接一次，`workspace/follow.rs`），bash / zsh 没配置就问「启用目录跟随？」；取消后这个连接不再问，重连后再问。「自动配置」往登录时读的启动文件追加带标记的一段（bash 的 `~/.bashrc`，登录文件不读它时写登录文件；`.profile` 不写，dash 也读它；zsh 的 `~/.zshrc`），再往终端输入 ` source …`（全屏程序里不输入，提示重连后生效）。fish 自己报，不配置；别的 shell 不问。
+    - 跟随只在目录变了时跳（引擎去重），手动浏览不被拉回；侧栏没连上时记下、连上再跳，不为跟随重连。报告带的主机名要等于检测到的 `uname -n`（不分大小写），终端里 ssh 到别的机器报的目录不跟；OSC 1337 `CurrentDir=` 没有主机名，照收。状态栏右边的「目录跟随」开关只管这个侧栏、不保存，初值是设置；打开它不会因为取消过而再问。
+    - 标记文本 `ShellRS directory follow` 和检测输出的 `@@` 行发布后不能改：检测和安装都靠它认出已配置的文件。
 - **在线升级**：
   - 清单地址 `https://dl.shellrs.com/update/v1/{channel}.json`、平台 key 的名字和公钥槽位一经发布就不能改。
   - 默认在后台检查并下载，下好、校验完才在标题栏亮按钮（`success` 色，出错时 `warning` 色）。
@@ -75,17 +85,19 @@ ShellRS（crate 与二进制都叫 `shellrs`）是 Xshell / WinSCP 式的 SSH �
   - 远程文件原地改写：截断后写原文件，不走 `.filepart` 加改名。保存前核对，被改过就问「覆盖」。
 - **设置 › 应用 › 窗口**：「记住窗口大小」（含最大化）和「记住窗口位置」两个开关，默认都开，下次启动生效。屏幕不在了或窗口不在屏幕上就居中，比屏幕大就缩小；全屏不记。
 - **终端交互**：「选中复制」默认关；「右键行为」无动作 / 粘贴 / 显示菜单，默认显示菜单。
-- **终端通知**：只做程序请求的（OSC 9 / 777）和响铃，不做 OSC 133 长命令通知：那要每台服务器装 shell 集成，收益不抵成本。不在前台发系统通知，在前台而终端在别的标签发应用内通知；响铃在终端就在眼前时不提醒。
+- **标签连接状态**：远程终端和 SFTP 标签按自己的连接（不是主机的汇总）在图标右下角显示状态点：连接中黄、断开红，已连接不显示（用户定的：有点就说明有情况；常亮的绿点太吵，三色点也只靠颜色区分）。远程终端断开后（失败、退出、断开、取消认证）按无修饰的 Enter 在原标签重连，本地终端不做。
+- **终端通知**：只做程序请求的（OSC 9 / 777）和响铃，不做 OSC 133 长命令通知：那要每台服务器装 shell 集成，收益不抵成本。（OSC 7 目录报告是另一回事：只给「文件」跟随用，用户同意后才往服务器写配置。）不在前台发系统通知，在前台而终端在别的标签发应用内通知；响铃在终端就在眼前时不提醒。
+- **界面字号**（issue #24）：「外观 › 常规」第三项，下拉框 12–20 每 1 px 一档，默认 16，即 gpui-kit 的默认、原来的大小。它就是 gpui-kit 主题的 `font_size`，界面的 rem 随它缩放（`settings::apply` 在换主题之后设）；终端字号另设。终端外的 ⌘= / ⌘- / ⌘0 直接改这个设置（用户定的，以前是不保存的临时缩放）。
 - **主题**：「应用外观」（浅色 / 深色 / 跟随系统）决定深浅；「外观 › 主题」左右两栏里浅色、深色各选一套，按当前外观生效。组里第一项「界面跟随主题」默认关闭：界面是中性的灰（浅色是 gpui-kit 默认主题，深色见下条），只有终端按主题配色；打开后界面也按主题配色。用户试过默认跟随，觉得中性界面更合适，别改回去。
   - 默认深色（ShellRS Dark）不用 gpui-kit 的近黑，用参照微信深色的炭灰：底色 `#1e1e1f`，标题栏、标签栏、状态栏 `#2f2f30`，边框和悬停 `#3b3b3d`，文字 `#e0e0e4`。用户嫌近黑刺眼。次要文字比微信的 `#7b7b7f` 亮一些（`#929296`），保持对比度 ≥ 4.5。侧栏三个列表和「最近连接」的选中行同色（`selected_row_color`）：浅色是悬停色三倍的对比，深色那样太刺眼，用加深后的悬停色，列表和表格的悬停只有它的一半（`DARK_HOVER_SHARE`）。两种外观下悬停和选中都要分得开。页面「重置」对卡片和开关各管各的。
   - 左栏只列浅色主题，右栏只列深色主题；卡片是名称加示例输出，选中的整张加底色，右上角是蓝底（主题的 `blue`）对勾。
   - 只有内置的，浅色、深色各 10 套，默认 ShellRS Light / Dark（底色与界面一致），Solarized 第二，Tokyo Day / Tokyo Night 第三。同一主题的浅、深两版在两栏同一行，没有另一版的（Rosé Pine Dawn、Everforest Light、Dracula、Nord）排最后。只收宽松许可（MIT、Apache-2.0）的配色。不做自定义主题、导入、按主机指定。
 - **键盘快捷键**：设置左栏单独一个分类，排在「关键字高亮」下面，分通用、标签、终端、编辑器四组。
-  - ⌘= / ⌘- / ⌘0 在终端（和它的查找条）里调终端字号（每次 1 像素，经设置写进「终端 › 字号」，范围同那里的 10–28，`FONT_SIZE_RANGE`），在终端外缩放界面（基准字号 12–20，步长 2，不保存）。同主流终端，别改回去。
+  - ⌘= / ⌘- / ⌘0 在终端（和它的查找条）里调终端字号（每次 1 像素，经设置写进「终端 › 字号」，范围同那里的 10–28，`FONT_SIZE_RANGE`），在终端外调「外观 › 常规 › 界面字号」（步长 2，经设置保存，⌘0 回默认 16）。同主流终端，别改回去。
   - 只收主要功能（含新加的下一个 / 上一个 / 切换到标签 1…9），不收 SFTP 文件列表、图片预览的键和 Enter、方向键、Tab、Esc 这类固定键。
   - 每行：按键（点了录制「按下组合键」，Esc 或失焦放弃）、禁用、恢复默认。键要带 ⌘ / Ctrl / Alt，或是 F1–F12（F12 以上不收，用户定的），或是 Shift 加 Insert、Delete、Home、End、PageUp、PageDown（Shift+Insert 粘贴；提示文字不提这条，只写 F1–F12）；撞上同一处的另一个快捷键或输入框等内置键就拒绝并提示占用者，不抢、不允许重复。
   - 存在 `settings.json` 的 `shortcuts`，只存和默认不同的（`null` 是禁用）。`Shortcut` 的 `id` 一经发布不能改。
-- **关键字高亮**：设置左栏单独一个分类，排在「终端」下面，三组：常规（总开关）、预览（当前终端主题下的示例输出）、规则（N）。规则存在 `settings.json`，所有终端共用。
+- **关键字高亮**：设置左栏单独一个分类，排在「SFTP」下面（左栏依次是外观、终端、SFTP、关键字高亮…），三组：常规（总开关）、预览（当前终端主题下的示例输出）、规则（N）。规则存在 `settings.json`，所有终端共用。
   - 规则表在行里直接改，不弹对话框：拖动把手（一直显示，只有把手能拖）、启用、正则表达式、备注、颜色（gpui-kit `ColorPicker` 加 `#rrggbb` 输入框）、通知、删除（不确认）。规则都是正则，区分大小写；颜色是用户数据，任意 RGB，不跟主题；不做加粗。重叠时靠前的优先。
   - 总开关默认关闭。首次（文件里没有这一项）预置三条示例：ERROR 红、WARN 琥珀、IPv4 蓝，各自启用、都不通知，打开总开关就能用；用户删光后保持为空。空的新行照样保存。
   - 通知同响铃：看不到那个终端才提醒，同一终端 10 秒一次，标题用备注。全屏程序（备用屏）里不高亮也不通知。
@@ -132,19 +144,22 @@ cargo test -- --ignored                     # 会读写真实钥匙串的测试�
 - `connection.rs`：问答协议（`ConnectionPrompt`…）、`Latency`、测试连接的 `LoginTest` / `ConnectionTester`。
 - `ssh/`：
   - `SshConnector`：所有登录都走它（终端、SFTP、exec、测试连接、端口转发、外部 CLI）。
-  - 远程终端的传输：pty、系统探测、延迟、旁路 exec。
+  - 远程终端的传输：pty、系统探测、延迟、旁路 exec 和 SFTP 通道（右侧栏「文件」）。
   - 代理握手；外部 CLI 用的 `run_command`。
-- `terminal/`：本地 PTY 和它跑的 shell（`local_shell.rs`：命令行拆分、已安装的 shell、Windows 的默认 shell）、驱动 `alacritty_terminal` 的引擎、`TerminalView`（网格、选区、查找、清屏）、关键字高亮（`highlight.rs`）、终端字体全局量、右侧栏工具共用的 `ExecTarget`。
+- `terminal/`：本地 PTY 和它跑的 shell（`local_shell.rs`：命令行拆分、已安装的 shell、Windows 的默认 shell）、驱动 `alacritty_terminal` 的引擎、`TerminalView`（网格、选区、查找、清屏）、关键字高亮（`highlight.rs`）、终端字体全局量、右侧栏工具共用的 `ExecTarget`、目录报告（`directory.rs`：OSC 7 / 1337 的解析）和「文件」目录跟随的远端脚本（`directory_setup.rs`：检测、安装、bash / zsh 片段）。
 - `sftp/`：可注入的传输和本地目录接口、`RemotePath`、`RemoteFs` 协议适配、worker（批次、三次重连、空闲断网检测），以及：
   - `upload.rs` / `download.rs`：断点续传，续传记录由 `journal.rs` 管；
   - `operations.rs`：删除、重命名、新建、改权限；
   - `edit.rs`：编辑器和预览的整文件读写。
-- `explorer/`：SFTP 标签的界面：两侧面板、列表、路径标签、各种对话框、传输队列，以及：
+- `explorer/`：SFTP 标签的界面（也是右侧栏「文件」，`ExplorerPanel` 的侧栏模式）：两侧面板、列表、路径标签、各种对话框、传输队列，以及：
   - `file_edit.rs`：给编辑器和预览读写文件；
-  - `preview.rs` / `image_preview.rs`：预览对话框和可缩放的图片。
+  - `preview.rs` / `image_preview.rs`：预览对话框和可缩放的图片；
+  - `find.rs` / `find_window.rs`：查找文件，纯的匹配和逐层查找模型，以及它的窗口；
+  - `marquee.rs`：列表怎么接鼠标（「名称」格才是项目、空白处单击取消选择、拖动框选），文件面板和查找结果共用；
+  - `file_icons.rs`：文件图标 `FileIcon`（按设置画单色或彩色），彩色的匹配表 `file_icons_table.rs` 和 `assets/icons/files/` 由 `scripts/file_icons.py` 从 Material Icon Theme 生成，不手改。
 - `editor/`：编辑器标签（`EditorPanel`），语言、缩进和状态栏文字是 `model.rs` 的纯函数。
 - `forward/`：端口转发的运行（`ForwardManager`、每条规则一个工作线程、SOCKS 解析）和界面。`credential/`：凭据的界面。
-- `monitor/`、`netstat/`、`processes/`、`services/`、`docker/`、`kubernetes/`、`history/`、`snippets/`：右侧栏的八个工具。各自是「命令（`linux.rs` 等）+ 纯解析和模型（`model.rs`）+ 面板」，确认和通知在工作区。
+- `monitor/`、`gpu/`、`netstat/`、`processes/`、`services/`、`docker/`、`kubernetes/`、`history/`、`snippets/`：右侧栏的九个命令类工具（第十个「文件」是 `explorer/` 的侧栏模式）。各自是「命令（`linux.rs` 等）+ 纯解析和模型（`model.rs`）+ 面板」，确认和通知在工作区。
 - `secrets/`：`SecretStore`（钥匙串）、`SecretRef`（条目归属）、`TemporarySecretStore`（不保存的连接的密码只在内存）。
 - `settings/`：`AppSettings`、写 `settings.json` 的 `SettingsStore`、把设置落到窗口上的 `apply`、设置标签。
 - `cli/`：外部 CLI（`shellrs hosts/credentials/exec/upload/download/sync`，给 AI Agent 用）、套接字协议、应用里的服务端、主机和凭据改动的校验（`manage.rs`）、PATH 和 Agent skill 的安装。
@@ -210,8 +225,10 @@ cargo test -- --ignored                     # 会读写真实钥匙串的测试�
 | 传输队列 / 书签 | Transfers / Bookmarks |
 | 显示隐藏文件 | Show hidden files |
 | 废纸篓 | macOS 写 Trash，Windows 写 Recycle Bin |
-| 右侧栏八个工具 | Snippets / History / Docker / Kubernetes / Services / Processes / Network / Monitor |
-| 设置七类（外观、终端、关键字高亮、键盘快捷键、外部 CLI、应用、关于） | Appearance / Terminal / Highlighting / Keyboard shortcuts / External CLI / General / About |
+| 右侧栏十个工具（GPU/NPU 两种语言都写 GPU/NPU） | Snippets / History / Files / Docker / Kubernetes / Services / Processes / Network / Monitor / GPU/NPU |
+| 侧栏功能 / 恢复默认 | Sidebar tools / Restore defaults |
+| 设置八类（外观、终端、SFTP、关键字高亮、键盘快捷键、外部 CLI、应用、关于） | Appearance / Terminal / SFTP / Highlighting / Keyboard shortcuts / External CLI / General / About |
+| 图标风格：单色 / 彩色 | Icon style: Monochrome / Color |
 | 应用更新 / 稳定版 / 重启并安装 / 查看更新内容 | Updates / Stable / Restart to update / What’s new |
 | 连接 / 断开连接 / 重新连接 | Connect / Disconnect / Reconnect |
 | 已连接 / 未连接 / 连接中 | Connected / Not connected / Connecting |
@@ -249,7 +266,7 @@ cargo test -- --ignored                     # 会读写真实钥匙串的测试�
 - **gpui-kit 的 `Settings` 把选中的分类放在元素状态里**，标签切走、不再绘制时就丢了，切回来回到第一类。设置页靠页头的 `title_suffix`（只给正在显示的页绘制）记下当前分类，再经 `default_selected_index` 恢复；页内滚动位置不保留。
 - **`Select` 必须放进有尺寸的容器**，否则会盖住整行。`ListItem` 里会增长的文字要 `w_0().flex_grow(1.).overflow_x_hidden()`，否则会把 `suffix` 挤出去。
 - **`ColorPicker` 要自己给常用色**（`featured_colors`）：默认的第一行是主题色，它们也在下面的调色板里。gpui-kit 按十六进制给色块起 id，同一颜色出现两格就是重复的无障碍节点，调试版在辅助技术（或借助它的窗口管理工具）连着时直接 panic；测试平台不建无障碍树，测不出来。常用色不能取调色板（shadcn 的 stone、red … pink）里的颜色。
-- **要彩色就不能用 `Icon`**：它把 SVG 当成单色遮罩画。系统徽章是「主题色圆底 + 单色 logo」。
+- **要彩色就不能用 `Icon`**：它把 SVG 当成单色遮罩画。系统徽章是「主题色圆底 + 单色 logo」。彩色的 SFTP 文件图标用 `img` 画；GPUI 把 SVG 图片按它自身尺寸的 2 倍栅格化，所以脚本把每个图标的宽高写成 16。
 - **`px(..)` 只用在 API 要 `Pixels` 的地方**，其余用 rem 助手和 `cx.theme()` 的 token。
 - **快捷键改了要重建整个 keymap**（`app/shortcuts.rs`）：GPUI 不能删单条绑定，`clear_key_bindings` 又会清掉 gpui-kit 在 `gpui_kit::init` 里注册的输入框、对话框、列表等绑定且无法重新注册。所以 `app::init` 先存 gpui-kit 绑定的快照，`apply_shortcuts` 每次按「快照 → 可改的通用键 → 固定的通用键 → 带上下文的键（可改的、固定的）」重绑。
   - 同一按键上下文越深越优先，深度相同后加的赢，所以带上下文的必须排在通用的后面（终端的 ⌘K、预览的 ⌘= 靠这个）。新加固定键放进 `fixed_*_bindings`，可改的放进 `SHORTCUTS`。
@@ -269,10 +286,11 @@ cargo test -- --ignored                     # 会读写真实钥匙串的测试�
   - 每次先发 `none`，再按 `LoginMethod` 走。
   - 密码和口令先查钥匙串，查不到或被拒才弹框；被拒时不删钥匙串条目。
   - 失败的说明一律经 `describe_login_error`，它沿错误链找真正的原因。
+  - 主机密钥和记下的不一致时也问（`HostKeyChanged`）：「更新并连接」删掉这台主机（`host:port`）记下的全部密钥再记新的（同 `ssh-keygen -R`），「取消」不连。没人能答的（测试连接、exec、CLI 传输、转发重连）的回调返回 `false`，当场拒绝，不能返回 `true` 却不回答，否则登录一直等。
 - **算法按 OpenSSH 的默认来**：加了 `ecdh-sha2-nistp*`，素数组交换最小 2048 位，因为用户的堡垒机是老 Java 上的 Apache SSHD。没有加 SHA-1、CBC 这些 OpenSSH 默认也不开的算法。
 - **区分断网和要人处理**：`is_network_error`，它要显式认 `russh::Error::IO`。只有网络类错误才自动重连。agent 的错误只格式化进文字，不挂进错误链。
 - **跳板。** 每台跳板开好通道就丢掉自己的 `Handle`，整条链靠下一跳攥着的通道流活着：最终连接一断，链依次关闭。问答写明是哪台跳板；跳板和代理的失败包一层 `RouteFailure`。
-- **外部连接只开一个通道**（`shell_only`）。用户的堡垒机在同一连接上多开一个通道就会结束会话，所以不做系统探测，旁路 exec 直接拒绝。以后给 SFTP 加别的通道，也要对 `is_external` 关掉。
+- **外部连接只开一个通道**（`shell_only`）。用户的堡垒机在同一连接上多开一个通道就会结束会话，所以不做系统探测，旁路 exec 和「文件」的 `OpenSftp` 直接拒绝（右侧栏也不提供这些工具）。
 - **右侧栏的工具在终端自己的连接上执行命令**（`TerminalTransportCommand::Exec`），不另起登录。
   - 一次一条，10 秒超时，输出最多 1 MB。
   - 命令写成一行 `sh -c '…'`，脚本里不出现单引号和 `!`，因为要经得过 bash、zsh、fish、csh。
@@ -283,9 +301,22 @@ cargo test -- --ignored                     # 会读写真实钥匙串的测试�
 ### SFTP
 
 - **每个标签独立连接、独立传输引擎。** 引擎一次只跑一批，其余在 `TransferQueue` 里排队，引擎的 `Idle` 推动队列前进；进度只归队首；停止的批次挡在队首，等用户继续或移出。
-- **SFTP 独立于终端。** 关闭终端不停传输；断开或删除主机会停止传输，并保留续传数据。
+- **批内并行**（`parallel.rs`）：同时跑 `parallel_transfers()` 项，共用那条 SFTP 会话。工作线程拿不到设置，`settings::apply` 把它放进进程级的原子量（`set_parallel_transfers`），每开始一项读一次，所以改了对正在跑的批次从下一项起生效；单元测试别改它。项的父目录是正在跑的目录项时，它和后面的都等着。断网或停止时正在跑的项（包括出错的那个）按原顺序回到 `pending` 前面，下次重跑；`TransferMeter` 记着每个在传的文件（`FileId`），界面显示传得最久的那个。
+  - 跑的时候批的可变状态借进 `Upload` / `Download` 的 `RefCell`（单线程运行时，借用不能跨 await）。
+  - 问答一次一个（`asking` 锁，界面也只有一个 `question`）；「应用于全部」在拿到锁后再看一次。
+- **小文件**（< `RESUME_THRESHOLD`，100 KB）按 WinSCP：
+  - 上传先 `open(CREAT|EXCL)`，失败了才 lstat、问覆盖、`open_replace` 就地写；close 和 setstat 一起发。
+  - 链接或写不进去的（只读）退回续传的路径（移开再发布），已经答过覆盖就不再问。
+  - 中途出错（不是断网）删掉目标；`written` 记下打开过的，重试直接覆盖、不再问，「丢弃续传进度」删掉没传完的。
+  - 下载仍写 `.filepart` 再改名（本机改名不花往返，失败时原文件还在），但不记续传、不刷盘，出错就删 `.filepart`。
+- **续传路径别加往返**：新建目录里的项不 lstat（`made_directories`，同 WinSCP 的新目录）；刚写完的 `.filepart` 不再 lstat 核对；只在要备份时才查和删备份。续传记录只在新建、`BackingUp`、`Publishing` 时落盘（恢复靠查远端的实际状态），macOS 上用普通 `fsync`（`journal::sync`）：std 的 `sync_all` 是 `F_FULLFSYNC`，一次约 10 ms。
+- **SFTP 标签独立于终端。** 关闭终端不停传输；断开或删除主机会停止传输，并保留续传数据。右侧栏的「文件」相反，走终端的连接、随终端走：
+  - `TerminalChannels` 是终端引擎每次启动、重连都重新 attach 的命令通道，交给 SFTP worker 后总能找到终端当前的连接；终端没连上时请求等它的 shell，没有连接就关掉回答（`TerminalNotConnected`，算断网、会重试）。
+  - 服务器拒绝 sftp 子系统要等 `Success` 才知道：russh 的 `request_subsystem` 不等回答，不等的话拒绝会以 EOF 出现、被当成断网重试。
+  - 通道流在终端的运行时上打开、在 SFTP worker 的运行时上用（russh 的通道只用 tokio 的 mpsc / Mutex / Notify，可以跨运行时）；没有 `SshHandle`，所以没有延迟读数。
+  - 它也在 `explorers` 里（动作、问答、编辑器照常），另有 `file_sidebars` 按终端找。`explorers_of`、`has_tabs`、主机状态汇总、`count_connection` 都不算它（它随终端存在，统计计 `tool_files`）；`transfers_of` 和升级重启提示的传输算它。
 - **下载严格按偏移顺序写 `.filepart`**，因为续传只信它的长度。
-- **只发 WinSCP 也发的请求**：用户的堡垒机对 `fsetstat` 回 Failure，收到 `fsync@openssh.com`（即使宣称支持）就断开整个会话。所以上传关闭文件后才按路径 `setstat` 设时间和权限；不用任何扩展：不发 fsync，覆盖也不用 `posix-rename@openssh.com`，而是先把旧文件改名成备份、发布后再删（不是原子的）。`protocol_tests` 的 `bastion_server` 对 `fsetstat` 和所有扩展请求都断开会话，守着这条。
+- **只发 WinSCP 也发的请求**：用户的堡垒机对 `fsetstat` 回 Failure，收到 `fsync@openssh.com`（即使宣称支持）就断开整个会话。所以上传关闭文件后才按路径 `setstat` 设时间和权限（setstat 紧跟 close 发出、不等它的回复，同 WinSCP）；不用任何扩展：不发 fsync，覆盖也不用 `posix-rename@openssh.com`，而是先把旧文件改名成备份、发布后再删（不是原子的）。`protocol_tests` 的 `bastion_server` 对 `fsetstat` 和所有扩展请求都断开会话，守着这条。
 - **文件操作从不跟随符号链接**：删除只删链接本身，改权限跳过链接，传输原样创建链接。
 - **空闲时也要发现断网**：通道流包一层 `WatchedStream`。等待时只持有 `Weak`，不能攥着 `Arc<SftpClient>`，否则「断开」关不掉连接。
 - **选择归面板，不归表格。** `DataTable` 设成 `row_selectable(false)`，`FilePane` 持有按名称保存的 `Selection`。「名称」单元格才是项目，拖文件只从图标和文件名开始，其余地方按下拖动是框选。
@@ -294,6 +325,8 @@ cargo test -- --ignored                     # 会读写真实钥匙串的测试�
   - 文件列表的快捷键按焦点路由（`ExplorerShortcut`，找 `contains_focus` 的那个标签），不按最近激活的标签。
 - **工具栏永远一行高**，放不下的按钮整个藏起来。新标签两侧对半分，改工具栏宽度时要重算放不放得下。分栏状态归标签（`ResizableState`）。读目录不挪动列表；出的问题写在窗口左下角（`status-connection`）。
 - **断开时**，对远程侧的操作要弹「SFTP 连接已断开 / 重新连接」。
+- **查找文件的 `List` 请求 id 从 `FIND_REQUESTS`（1 << 62）起**，标签按 id 把回答分给查找窗口，不经远程面板；断线时查找按失败结束。
+- **查找文件是第二个窗口**：它自己有 `Root`、`TitleBar` 和通知层，按钮的命令经主窗口的句柄交给工作区（`ExplorerSender`），和主窗口里的按钮走同一个处理器。设置只落到主窗口上，它自己观察 `Theme`、`UiLocale`、图标风格和大小格式来重画。SFTP 标签关闭、工作区释放（主窗口关了）时由标签关掉它，否则 Windows / Linux 上关了主窗口应用还剩这个窗口。程序坞图标找回的是全局量 `MainWindow`，不是「第一个窗口」。
 - **编辑器和预览：先读后开**，读写走 SFTP 标签自己的连接。
   - `ReadFile`、`ReadBytes`、`WriteFile` 和 `List` / `Operate` 一样另起任务，和传输并行。
   - 文件读成功才开标签或对话框；读不了的在 `refuse_open` 说明，远程的给「下载…」。
@@ -349,7 +382,7 @@ cargo test -- --ignored                     # 会读写真实钥匙串的测试�
   - 只在 `Workspace::new` 里启动（`AnalyticsServices::system`），`new_with_services` 没有；UI 测试用 `Analytics::new(sender)` 读信号。
   - 计数只能是 `Counter` 的变体，快照字段只有 `&'static str`、开关和数量，用户输入的东西放不进去。计数的键发布后不能改，新加的要同步 `docs/manual.md`「隐私」一节的清单。
   - UI 线程只往通道里发信号；系统检测（`os_info` 会起 `uname` 等子进程）、HTTP、写 `analytics.json` 都在 `shellrs-analytics` 线程上，退出不冲队列。
-  - SSH 连上靠 `TerminalEvent::Started` → `TerminalPanelEvent::Connected`，不能在每批输出都发的 `StatusChanged` 里记；SFTP 看 `StateChanged` 时的 `connection_state()`。外部 CLI 的请求种类由 `CliServer::take_usage` 交给 `serve_cli` 的轮询。
+  - SSH 连上靠 `TerminalEvent::Started` → `TerminalPanelEvent::Connected`，不能在每批输出都发的 `StatusChanged` 里记；SFTP 看 `StateChanged` 时的 `connection_state()`（右侧栏的「文件」不算，它计 `tool_files`）。外部 CLI 的请求种类由 `CliServer::take_usage` 交给 `serve_cli` 的轮询。
 - **发布走 tag** `v<版本>`（`release.yml`，需要人工批准，清单最后才上传）。`CHANGELOG.md` 那一节由改版本号的提交写，功能提交不改。一次性准备见 `docs/release.md`。
 - **macOS 上关窗口是隐藏**（`hide_when_closed`），⌘Q 才退出。测试平台的 `hide()` 没实现，所以这条只挂在生产路径上。
 
@@ -370,8 +403,9 @@ cargo test -- --ignored                     # 会读写真实钥匙串的测试�
   - `settings.json` 里读不了的规则单条丢掉（`readable_rules`），否则整个设置文件会回退成默认值。
   - 规则表的输入框和取色器状态归 `HighlightRulesEditor`（行 id 不随位置变，拖动后字段跟着走），每次改动整表写回设置；设置被别处改了才重建行。
 - **同步更新（DEC 2026）要解析线程自己收尾**：vte 只管攒住 `\e[?2026h` 之后的输出，超时（150 ms）后调 `stop_sync` 是调用方的事，alacritty 自己的事件循环就是这么做的。解析线程等输出时带着截止时间（`receive`，用 `async_io` 的定时器），到点就画出来；输出一直不停时在 `advance` 前补查；退出、出错追加提示前也先 `stop_sync`。否则程序死在一帧中间、连接断在一帧中间时，屏幕会一直冻住。
+- **程序的查询在解析线程上按顺序回答**：光标位置、DA、窗口尺寸、颜色（OSC 4 / 10 / 11 / 12）的回答都先攒在 `TerminalEventProxy`，每段输出解析完由 `answer` 一次写出。颜色要先看程序自己设的色，只有攥着 `Term` 的解析线程读得到；主题由引擎观察 `TerminalColors` 放进共用的槽。别把颜色交回 UI 线程答：termenv（ollama 等）先问 OSC 11 再问光标，先收到光标报告就当终端不支持，晚到的颜色回答会被 shell 当成输入（提示符后多出 `11;rgb:…`）。
 - **OSC 52 只写不读**（`Osc52::OnlyCopy`），只认剪贴板 `c`，主选择区忽略。
-- **通知**：OSC 9 / 777 由 `terminal/notices.rs` 的扫描器在解析线程上认（alacritty 会丢掉），OSC 9 里「数字;」开头的是 ConEmu 的命令，不算通知。投递在 `workspace/notices.rs`：窗口不在前台走 GPUI 的 `show_system_notification`（tag 是 `terminal:local:<id>` / `terminal:remote:<id>`，点击回调按 tag 切标签），在前台走应用内通知。`shellrs::init` 里的 `set_app_identity` 用 bundle id，测试平台没有它就不发系统通知；macOS 上 `cargo run` 没有 bundle，看不到系统通知。
+- **通知**：OSC 9 / 777 由 `terminal/notices.rs` 的扫描器在解析线程上认（alacritty 会丢掉），同一趟也认 OSC 7 / 1337 目录报告（每块输出只留最后一个，引擎只在变了时发 `DirectoryChanged`，重连、断开、退出时清空），OSC 9 里「数字;」开头的是 ConEmu 的命令，不算通知。投递在 `workspace/notices.rs`：窗口不在前台走 GPUI 的 `show_system_notification`（tag 是 `terminal:local:<id>` / `terminal:remote:<id>`，点击回调按 tag 切标签），在前台走应用内通知。`shellrs::init` 里的 `set_app_identity` 用 bundle id，测试平台没有它就不发系统通知；macOS 上 `cargo run` 没有 bundle，看不到系统通知。
 
 ## 测试约定
 

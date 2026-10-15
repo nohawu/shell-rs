@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-/// Namespaced resource kinds offered by the Kubernetes browser.
+/// Resource kinds offered by the Kubernetes browser.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ResourceKind {
     #[default]
@@ -499,6 +499,25 @@ pub(super) fn containers(value: &Value) -> Vec<String> {
         .flat_map(|field| value["spec"][field].as_array().into_iter().flatten())
         .filter_map(|container| container["name"].as_str().map(str::to_owned))
         .collect()
+}
+
+/// kubectl's last-applied annotation can embed a Secret's complete data.
+/// Exclude it from the metadata-only inspector, just as list reads do.
+pub(super) fn secret_detail(value: &Value) -> Result<Value, String> {
+    let mut metadata = value
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| crate::i18n::t!("k8s.incomplete").to_string())?;
+    metadata.remove("managedFields");
+    if let Some(annotations) = metadata
+        .get_mut("annotations")
+        .and_then(Value::as_object_mut)
+    {
+        annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
+    }
+    Ok(serde_json::json!({"kind":"Secret", "metadata":metadata}))
 }
 
 /// A selector for workloads and services, including set-based expressions.

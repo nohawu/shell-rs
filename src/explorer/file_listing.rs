@@ -1,9 +1,9 @@
 use crate::app::ExplorerDispatch as _;
-use crate::app::{CatalogIcon, ExplorerAction, ExplorerCommand};
+use crate::app::{ExplorerAction, ExplorerCommand};
 use crate::i18n::{t, tn};
 use crate::sftp::TransferDirection;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, h_flex,
+    ActiveTheme as _, h_flex,
     table::{Column, ColumnSort, TableDelegate, TableState},
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -16,8 +16,9 @@ use std::{
 };
 
 use super::{
-    ClickMode, ExplorerId, FileEntry, FileKind, FilePane, FileSizeFormat, PaneSide, Selection,
+    ClickMode, ExplorerId, FileEntry, FileIcon, FilePane, FileSizeFormat, PaneSide, Selection,
     child_path, format_changed, format_rights,
+    marquee::{ListGeometry, Pressed, ends_a_drag},
 };
 
 /// What the row closures need from the pane, pushed in by `FilePane` so
@@ -63,55 +64,6 @@ impl ListPlaceholder {
     }
 }
 
-/// Where the list and its rows are on screen, recorded as they paint, so a
-/// selection rectangle can tell which rows it covers. Rows are all the same
-/// height, so one row tells where all of them are.
-#[derive(Default)]
-pub(super) struct ListGeometry {
-    /// Where the first row's top is (scrolled out of view or not), and the
-    /// row height.
-    pub rows: Cell<Option<(Pixels, Pixels)>>,
-    /// The list, header included.
-    pub list: Cell<Option<Bounds<Pixels>>>,
-    /// Where the left button went down in the list last.
-    pub press: Cell<Option<Point<Pixels>>>,
-    /// What the last press in the list landed on.
-    pub pressed: Cell<Pressed>,
-}
-
-/// What a press in the list landed on. As in WinSCP without full row select,
-/// everything but the name cells and the column titles is empty space:
-/// clicking there clears the selection, and dragging from there draws a
-/// rectangle.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Pressed {
-    #[default]
-    Empty,
-    /// A name cell, which clicks and right-clicks select. Dragging its icon
-    /// and text moves files; dragging the rest of it draws a rectangle.
-    Name,
-    /// A column title.
-    Title,
-}
-
-/// How far a press may move and still be a click: GPUI's own drag
-/// threshold, which is private.
-const DRAG_THRESHOLD: f64 = 2.;
-
-/// Whether a click is the end of a drag instead. GPUI forgets every pending
-/// press once it paints a frame with a drag active, but a drag started and
-/// let go within one frame (a quick flick) still clicks each element both
-/// ends were over, bar the drag's own: a rectangle or a file drag let go
-/// over the name cell it began in must not select that row alone.
-fn ends_a_drag(event: &ClickEvent) -> bool {
-    match event {
-        ClickEvent::Mouse(click) => {
-            (click.up.position - click.down.position).magnitude() > DRAG_THRESHOLD
-        }
-        _ => false,
-    }
-}
-
 /// Where a right-click in the list landed, when not on empty space.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum MenuHit {
@@ -133,6 +85,9 @@ pub struct FileListing {
     show_hidden: bool,
     sort: Option<(usize, ColumnSort)>,
     side: PaneSide,
+    /// The right sidebar's narrow list: names and sizes, and rows that do
+    /// not drag out (see `set_compact`).
+    compact: bool,
     context: ListingContext,
 }
 
@@ -183,8 +138,24 @@ impl FileListing {
             show_hidden: false,
             sort: None,
             side,
+            compact: false,
             context: ListingContext::default(),
         }
+    }
+
+    /// Fit the right sidebar: only names and sizes. Rows no longer drag
+    /// out: dropped on an SFTP tab's local pane, they would be fetched from
+    /// that tab's host, not this one.
+    pub(super) fn set_compact(&mut self) {
+        self.compact = true;
+        self.columns = vec![
+            name_column(px(200.)),
+            Column::new("size", column_title("size"))
+                .width(px(88.))
+                .sortable(),
+        ];
+        self.sort = None;
+        self.apply_sort();
     }
 
     pub(super) fn configure(&mut self, context: ListingContext) {
@@ -293,6 +264,9 @@ impl FileListing {
             }),
             None => cell,
         };
+        if self.compact {
+            return cell;
+        }
         let paths = names.iter().map(|name| self.child_path(name));
         match self.side {
             PaneSide::Local => drag_files(
@@ -417,18 +391,6 @@ impl FileListing {
     }
 }
 
-fn icon_for(entry: &FileEntry) -> Icon {
-    if entry.is_parent() {
-        return Icon::new(CatalogIcon::FolderUp);
-    }
-    match (entry.kind, entry.target) {
-        (FileKind::Dir, _) => Icon::new(IconName::Folder),
-        (FileKind::File, _) => Icon::new(IconName::File),
-        (FileKind::Symlink, Some(FileKind::Dir)) => Icon::new(CatalogIcon::FolderSymlink),
-        (FileKind::Symlink, _) => Icon::new(CatalogIcon::FileSymlink),
-    }
-}
-
 impl TableDelegate for FileListing {
     fn columns_count(&self, _: &App) -> usize {
         self.columns.len()
@@ -506,12 +468,7 @@ impl TableDelegate for FileListing {
                     .h_full()
                     .min_w_0()
                     .gap_2()
-                    .child(
-                        icon_for(entry)
-                            .small()
-                            .text_color(cx.theme().muted_foreground)
-                            .when(entry.is_hidden(), |icon| icon.opacity(0.6)),
-                    )
+                    .child(FileIcon::entry(entry).dimmed(entry.is_hidden()))
                     .child(div().min_w_0().truncate().child(entry.name.clone()));
                 let label = if parent {
                     label

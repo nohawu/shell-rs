@@ -2,9 +2,12 @@ use gpui_kit::component::ThemeMode;
 use gpui_kit::{SharedString, WindowAppearance};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::app::ShortcutOverrides;
-use crate::explorer::{FileSizeFormat, ShowHiddenFiles};
+use std::collections::BTreeMap;
+
+use crate::app::{ShortcutOverrides, ToolKind};
+use crate::explorer::{FileIconStyle, FileSizeFormat, ShowHiddenFiles};
 use crate::i18n::t;
+use crate::sftp::{DEFAULT_PARALLEL_TRANSFERS, PARALLEL_TRANSFERS_RANGE};
 use crate::terminal::{
     DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, FONT_SIZE_RANGE, HighlightRule, LINE_HEIGHT_RANGE,
     RightClick, TerminalInteraction, TerminalTheme, default_rules,
@@ -19,11 +22,15 @@ use crate::update::Channel;
 pub struct AppSettings {
     pub language: InterfaceLanguage,
     pub appearance: Appearance,
+    /// 外观 → 常规 → 界面字号.
+    pub interface: InterfaceSettings,
     /// 外观 → 终端主题.
     pub terminal_theme: TerminalThemeSettings,
     pub terminal_font: TerminalFontSettings,
     /// 终端 → 终端交互.
     pub terminal_interaction: TerminalInteraction,
+    /// 终端 → 侧栏功能: which tools the right sidebar offers.
+    pub sidebar_tools: SidebarTools,
     /// 终端 → 本地终端.
     pub local_terminal: LocalTerminalSettings,
     pub external_cli: ExternalCliSettings,
@@ -36,27 +43,128 @@ pub struct AppSettings {
     /// 显示隐藏文件 in the SFTP lists, each side on its own, switched from
     /// their toolbars and menus.
     pub show_hidden: ShowHiddenFiles,
+    /// SFTP → 传输.
+    pub transfers: TransferSettings,
+    /// SFTP → 图标风格.
+    pub file_icon_style: FileIconStyle,
+    /// SFTP → 文件侧栏.
+    pub file_sidebar: FileSidebarSettings,
     /// 终端 → 通知.
     pub notifications: NotificationSettings,
     /// 关键字高亮.
     pub terminal_highlight: TerminalHighlightSettings,
     /// 应用 → 窗口.
     pub window: WindowSettings,
-    /// 应用 → 功能模块. Changes take effect immediately.
-    pub modules: ModuleSettings,
     /// 键盘快捷键: what the user changed of them.
     pub shortcuts: ShortcutOverrides,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// What 界面字号 offers, in pixels.
+pub const INTERFACE_FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 12.0..=20.0;
+/// gpui-kit's own base font, which the interface had before it could change.
+pub const DEFAULT_INTERFACE_FONT_SIZE: f32 = 16.0;
+
+/// 外观 → 常规.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ModuleSettings {
-    pub kubernetes: bool,
+pub struct InterfaceSettings {
+    /// 界面字号: the base font in pixels, which the interface's text and
+    /// spacing follow. Terminals have their own.
+    pub font_size: f32,
 }
 
-impl Default for ModuleSettings {
+impl Default for InterfaceSettings {
     fn default() -> Self {
-        Self { kubernetes: true }
+        Self {
+            font_size: DEFAULT_INTERFACE_FONT_SIZE,
+        }
+    }
+}
+
+/// SFTP → 传输.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransferSettings {
+    /// 最大同时传输数量: how many files of an upload or a download move at
+    /// once; the rest wait their turn.
+    pub parallel: usize,
+}
+
+impl Default for TransferSettings {
+    fn default() -> Self {
+        Self {
+            parallel: DEFAULT_PARALLEL_TRANSFERS,
+        }
+    }
+}
+
+/// SFTP → 文件侧栏: the right sidebar's 文件.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileSidebarSettings {
+    /// 自动检测目录配置: on showing 文件, see whether the host's shell reports
+    /// its folder and offer to set it up if not; also whether 文件 follows
+    /// the terminal's folder to begin with. On unless turned off.
+    pub detect_directory_follow: bool,
+}
+
+impl Default for FileSidebarSettings {
+    fn default() -> Self {
+        Self {
+            detect_directory_follow: true,
+        }
+    }
+}
+
+/// 终端 → 侧栏功能: the tools the user offers in the right sidebar or takes
+/// out of it, by `ToolKind::key`; a tool not in it has its default. So a
+/// tool added later comes with its own default, and a key this version does
+/// not know (a newer one's tool) is kept for the version that does. A value
+/// that is not a yes or no is dropped on its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SidebarTools(BTreeMap<String, bool>);
+
+impl<'de> Deserialize<'de> for SidebarTools {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let values = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+        Ok(Self(
+            values
+                .into_iter()
+                .filter_map(|(key, value)| Some((key, value.as_bool()?)))
+                .collect(),
+        ))
+    }
+}
+
+impl SidebarTools {
+    pub fn shows(&self, tool: ToolKind) -> bool {
+        self.0
+            .get(tool.key())
+            .copied()
+            .unwrap_or(tool.shown_by_default())
+    }
+
+    /// Offer `tool`, or not. Its default is stored as no change.
+    pub fn set(&mut self, tool: ToolKind, shown: bool) {
+        if shown == tool.shown_by_default() {
+            self.0.remove(tool.key());
+        } else {
+            self.0.insert(tool.key().to_owned(), shown);
+        }
+    }
+
+    /// Whether every tool this version knows has its default.
+    pub fn is_default(&self) -> bool {
+        ToolKind::ALL
+            .iter()
+            .all(|tool| self.shows(*tool) == tool.shown_by_default())
+    }
+
+    /// Every tool this version knows back to its default.
+    pub fn reset(&mut self) {
+        for tool in ToolKind::ALL {
+            self.0.remove(tool.key());
+        }
     }
 }
 
@@ -273,6 +381,24 @@ impl Choice for Channel {
     }
 }
 
+impl Choice for FileIconStyle {
+    const ALL: &'static [Self] = &[Self::Monochrome, Self::Color];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Monochrome => "monochrome",
+            Self::Color => "color",
+        }
+    }
+
+    fn label(self) -> SharedString {
+        match self {
+            Self::Monochrome => t!("settings.file_icons.monochrome"),
+            Self::Color => t!("settings.file_icons.color"),
+        }
+    }
+}
+
 impl Choice for RightClick {
     const ALL: &'static [Self] = &[Self::Nothing, Self::Paste, Self::Menu];
 
@@ -299,6 +425,21 @@ impl AppSettings {
     /// file nor a typed value can give the terminal a size of zero.
     pub fn normalized(mut self) -> Self {
         self.terminal_font = self.terminal_font.normalized();
+        // Whole pixels in range; what is not a number gives the default.
+        let size = self.interface.font_size;
+        self.interface.font_size = if size.is_finite() {
+            size.clamp(
+                *INTERFACE_FONT_SIZE_RANGE.start(),
+                *INTERFACE_FONT_SIZE_RANGE.end(),
+            )
+            .round()
+        } else {
+            DEFAULT_INTERFACE_FONT_SIZE
+        };
+        self.transfers.parallel = self.transfers.parallel.clamp(
+            *PARALLEL_TRANSFERS_RANGE.start(),
+            *PARALLEL_TRANSFERS_RANGE.end(),
+        );
         self.local_terminal.shell = self
             .local_terminal
             .shell
@@ -489,6 +630,7 @@ mod tests {
         check::<InterfaceLanguage>();
         check::<Appearance>();
         check::<RightClick>();
+        check::<FileIconStyle>();
         assert_eq!(Appearance::from_key("sepia"), None);
     }
 
@@ -503,6 +645,11 @@ mod tests {
         let settings: AppSettings =
             serde_json::from_str(r#"{"file_size_format":"short"}"#).unwrap();
         assert_eq!(settings.file_size_format, FileSizeFormat::Short);
+        // The SFTP lists keep the app's monochrome icons unless asked.
+        assert_eq!(
+            AppSettings::default().file_icon_style,
+            FileIconStyle::Monochrome
+        );
         // Hidden files are left out unless the file says otherwise, for
         // each side on its own.
         assert_eq!(
@@ -513,6 +660,103 @@ mod tests {
             serde_json::from_str(r#"{"show_hidden":{"remote":true}}"#).unwrap();
         assert!(settings.show_hidden.remote);
         assert!(!settings.show_hidden.local);
+        // 文件 looks for and follows the terminal's folder unless told not to.
+        assert!(AppSettings::default().file_sidebar.detect_directory_follow);
+        let settings: AppSettings = serde_json::from_str(r#"{"file_sidebar":{}}"#).unwrap();
+        assert!(settings.file_sidebar.detect_directory_follow);
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"file_sidebar":{"detect_directory_follow":false}}"#).unwrap();
+        assert!(!settings.file_sidebar.detect_directory_follow);
+    }
+
+    /// 侧栏功能: every tool but GPU/NPU until the user says otherwise, and
+    /// only what differs from that in the file.
+    #[test]
+    fn the_sidebar_offers_its_usual_tools_until_told_otherwise() {
+        let tools = AppSettings::default().sidebar_tools;
+        assert!(tools.is_default());
+        assert!(tools.shows(ToolKind::Monitor));
+        assert!(!tools.shows(ToolKind::Gpu));
+
+        let mut tools = SidebarTools::default();
+        tools.set(ToolKind::Gpu, true);
+        tools.set(ToolKind::Docker, false);
+        assert!(!tools.is_default());
+        assert_eq!(
+            serde_json::to_value(&tools).unwrap(),
+            serde_json::json!({"docker": false, "gpu": true})
+        );
+        // Back to its default is no change at all.
+        tools.set(ToolKind::Docker, true);
+        assert_eq!(
+            serde_json::to_value(&tools).unwrap(),
+            serde_json::json!({"gpu": true})
+        );
+        tools.reset();
+        assert_eq!(tools, SidebarTools::default());
+
+        // A newer version's tool is kept; a value that is no yes or no
+        // costs only itself.
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"sidebar_tools":{"gpu":true,"k8s":true,"docker":"no","history":false}}"#,
+        )
+        .unwrap();
+        let tools = settings.sidebar_tools;
+        assert!(tools.shows(ToolKind::Gpu));
+        assert!(tools.shows(ToolKind::Docker));
+        assert!(!tools.shows(ToolKind::History));
+        assert_eq!(
+            serde_json::to_value(&tools).unwrap(),
+            serde_json::json!({"gpu": true, "history": false, "k8s": true})
+        );
+        let mut tools = tools;
+        tools.reset();
+        assert!(tools.is_default());
+        assert_eq!(
+            serde_json::to_value(&tools).unwrap(),
+            serde_json::json!({"k8s": true}),
+            "not this version's to reset"
+        );
+    }
+
+    /// 界面字号: gpui-kit's 16 until changed, whole pixels within 12–20.
+    #[test]
+    fn the_interface_font_stays_as_it_was_until_changed() {
+        assert_eq!(AppSettings::default().interface.font_size, 16.);
+        let settings: AppSettings = serde_json::from_str(r#"{"interface":{}}"#).unwrap();
+        assert_eq!(settings.interface.font_size, 16.);
+        for (written, kept) in [
+            (14., 14.),
+            (14.6, 15.),
+            (8., 12.),
+            (30., 20.),
+            (f32::NAN, 16.),
+        ] {
+            let settings = AppSettings {
+                interface: InterfaceSettings { font_size: written },
+                ..AppSettings::default()
+            };
+            assert_eq!(settings.normalized().interface.font_size, kept, "{written}");
+        }
+    }
+
+    /// 最大同时传输数量: three unless the file says otherwise, and never
+    /// beyond what the settings page offers.
+    #[test]
+    fn transfers_run_three_at_once_unless_the_file_says_otherwise() {
+        assert_eq!(AppSettings::default().transfers.parallel, 3);
+        let settings: AppSettings = serde_json::from_str(r#"{"transfers":{}}"#).unwrap();
+        assert_eq!(settings.transfers.parallel, 3);
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"transfers":{"parallel":6}}"#).unwrap();
+        assert_eq!(settings.normalized().transfers.parallel, 6);
+        for (written, kept) in [(0, 1), (50, 10)] {
+            let settings = AppSettings {
+                transfers: TransferSettings { parallel: written },
+                ..AppSettings::default()
+            };
+            assert_eq!(settings.normalized().transfers.parallel, kept);
+        }
     }
 
     #[test]

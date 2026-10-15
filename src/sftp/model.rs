@@ -363,7 +363,7 @@ pub struct TransferProgress {
     pub(crate) bytes_per_second: u64,
     pub(crate) details: Vec<TransferDetail>,
     /// The file in flight: where it comes from, and how far it has got.
-    /// One file moves at a time, so there is at most one.
+    /// Several move at once; this is the one that has been going longest.
     pub(crate) current_source: String,
     pub(crate) current_bytes: u64,
     pub(crate) current_total: u64,
@@ -558,6 +558,11 @@ impl TransferProgress {
 }
 /// The bytes an item puts through: a file's size, nothing for folders and
 /// links.
+/// From this size on a file goes through `<name>.filepart` and can resume, as
+/// WinSCP's default “files above 100 KB”. A smaller one goes straight to its
+/// name: sent again whole costs less than the bookkeeping that resumes it.
+pub(crate) const RESUME_THRESHOLD: u64 = 100 * 1024;
+
 pub(crate) fn file_size(metadata: &FileMetadata) -> u64 {
     if metadata.kind() == EntryKind::File {
         metadata.size()
@@ -738,6 +743,11 @@ pub trait LocalDirectoryProvider: Send + Sync + 'static {
     fn places(&self) -> Vec<(Place, PathBuf)> {
         Vec::new()
     }
+    /// Where downloads go when nothing else says: the system's Downloads
+    /// folder. Only works out the path, so it may run anywhere.
+    fn downloads(&self) -> PathBuf {
+        self.home()
+    }
     /// Move items to the system trash. Links go as links.
     fn trash(&self, paths: &[PathBuf]) -> Result<()>;
     /// Rename without replacing an existing item.
@@ -809,6 +819,9 @@ pub struct SystemLocalDirectoryProvider;
 impl LocalDirectoryProvider for SystemLocalDirectoryProvider {
     fn home(&self) -> PathBuf {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+    }
+    fn downloads(&self) -> PathBuf {
+        dirs::download_dir().unwrap_or_else(|| self.home())
     }
     fn places(&self) -> Vec<(Place, PathBuf)> {
         [

@@ -54,6 +54,8 @@ Hosts, groups, credentials and forwarding rules live in a local SQLite database.
 - Docker: containers grouped by compose project, with start, stop, restart, details and logs, plus volumes, images and networks. When not root, passwordless sudo is used (for services as well).
 - Kubernetes: select a cluster from the host's kubeconfig, filter resources by namespace, inspect workloads and services, browse related pods, search container logs and copy kubectl commands. See the [user manual](docs/manual.en.md#kubernetes).
 - Command history reads `~/.bash_history` on the host, and snippets, shared by every host, can be sorted into categories; click one to type it into the terminal, or run it straight away.
+- Files: a single remote file list beside the terminal, on an SFTP channel of the terminal's own connection, following the terminal's current folder. Browse, edit and preview, drop files in to upload, and download to your Downloads folder.
+- GPU/NPU: an AI host's NVIDIA GPUs and Huawei Ascend NPUs, laid out for eight: totals, each device's utilization, memory, temperature, power and health, and the compute processes, which you can end. Off by default; turn it on in the settings, where the other tools can be hidden too.
 
 **SFTP**
 
@@ -123,7 +125,7 @@ Download from [shellrs.com/download](https://shellrs.com/download), which offers
 | macOS 11+ (Apple Silicon) | `ShellRS-<version>-macos-aarch64.dmg` | Signed and notarized. Open the DMG and drag ShellRS into Applications |
 | macOS 11+ (Intel) | `ShellRS-<version>-macos-x86_64.dmg` | Signed and notarized. Open the DMG and drag ShellRS into Applications |
 | Windows x64 | `ShellRS-<version>-windows-x86_64-setup.exe` | Installs per user, no administrator rights needed. The installer is not signed yet; if SmartScreen stops it, choose "More info › Run anyway" |
-| Linux x64 | `ShellRS-<version>-linux-x86_64.AppImage` | `chmod +x` and run. Needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12 and later) |
+| Linux x64 | `ShellRS-<version>-linux-x86_64.AppImage` | `chmod +x` and run. Needs glibc 2.31 or newer (Ubuntu 20.04, Debian 11 and later) |
 
 Every package comes with a minisign signature (`.minisig`), and each release has a `SHA256SUMS` file.
 
@@ -199,6 +201,7 @@ cargo test
 - [alacritty_terminal](https://crates.io/crates/alacritty_terminal) and [portable-pty](https://crates.io/crates/portable-pty): terminal emulation and local PTYs
 - [keyring](https://crates.io/crates/keyring): the system keychain
 - [Simple Icons](https://simpleicons.org): the OS logos on host badges and the Docker logo in the right sidebar (CC0)
+- [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme): the SFTP lists' color icons (MIT)
 - [WinSCP](https://winscp.net) and Xshell: the interaction designs ShellRS follows
 
 ## License

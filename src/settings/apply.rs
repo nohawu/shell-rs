@@ -1,7 +1,7 @@
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::*;
 
-use crate::explorer::{FileSizeFormat, ShowHiddenFiles};
+use crate::explorer::{FileIconStyle, FileSizeFormat, ShowHiddenFiles};
 use crate::i18n::UiLocale;
 use crate::terminal::{
     TerminalColors, TerminalFont, TerminalHighlights, TerminalInteraction, is_font_installed,
@@ -11,9 +11,11 @@ use super::AppSettings;
 use super::app_theme::{ui_theme, ui_theme_name};
 
 /// Bring the window in line with the settings: the theme chosen for the
-/// appearance, in the app and its terminals, the locale, the terminal font,
+/// appearance, in the app and its terminals, the interface's font size, the
+/// locale, the terminal font,
 /// mouse and highlight rules, the keyboard shortcuts, the SFTP size format and
-/// whether SFTP shows hidden files.
+/// icons, how many files SFTP moves at once, and whether it shows hidden
+/// files.
 /// Does nothing where they already agree, so it can run on every settings
 /// change and every change of the system appearance.
 pub fn apply(settings: AppSettings, window: &mut Window, cx: &mut App) {
@@ -32,6 +34,15 @@ pub fn apply(settings: AppSettings, window: &mut Window, cx: &mut App) {
         Theme::change(mode, Some(window), cx);
         // The theme change resets the list hover to the theme's own.
         crate::app::deepen_list_hover(cx);
+    }
+
+    // 界面字号: the base font the interface's sizes follow. After the theme,
+    // whose change keeps it.
+    let font_size = px(settings.interface.font_size);
+    if cx.theme().font_size != font_size {
+        Theme::global_mut(cx).font_size = font_size;
+        Theme::sync_base(cx);
+        window.refresh();
     }
 
     let colors = TerminalColors::new(chosen);
@@ -92,6 +103,14 @@ pub fn apply(settings: AppSettings, window: &mut Window, cx: &mut App) {
         cx.set_global(settings.file_size_format);
         window.refresh();
     }
+
+    if cx.try_global::<FileIconStyle>() != Some(&settings.file_icon_style) {
+        cx.set_global(settings.file_icon_style);
+        window.refresh();
+    }
+
+    // For the SFTP worker threads, which have no app to look in.
+    crate::sftp::set_parallel_transfers(settings.transfers.parallel);
 
     // The SFTP lists observe it and list their rows again.
     if cx.try_global::<ShowHiddenFiles>() != Some(&settings.show_hidden) {

@@ -9,17 +9,17 @@ use gpui_kit::component::{
 use gpui_kit::*;
 
 use crate::app::{
-    CatalogIcon, CenterTab, CloseTerminal, ConnectHost, CopyHostAddress, DisconnectTerminal,
-    EditHost, OpenExplorer, ReconnectTerminal, RenameTerminal,
+    CatalogIcon, CenterTab, CloseTerminal, ConnectHost, CopyHostAddress, CopyHostId,
+    DisconnectTerminal, EditHost, OpenExplorer, ReconnectTerminal, RenameTerminal,
 };
 use crate::connection::{ConnectionPrompt, ConnectionPromptReply};
-use crate::host::{HostId, HostOs, HostStore};
+use crate::host::{ConnectionState, HostId, HostOs, HostStore};
 use crate::i18n::t;
 use crate::shared::{ClosableTabTitle, HostMark, LatencyLabel, RenamableTab, close_tab_items};
 
 use super::{
-    RemoteTerminalId, SharedRemoteTerminalTransportProvider, TerminalEvent, TerminalLifecycle,
-    TerminalMenuItems, TerminalNotice, TerminalStatus, TerminalView,
+    RemoteTerminalId, ReportedDirectory, SharedRemoteTerminalTransportProvider, TerminalEvent,
+    TerminalLifecycle, TerminalMenuItems, TerminalNotice, TerminalStatus, TerminalView,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +32,8 @@ pub enum TerminalPanelEvent {
     PromptRequested(RemoteTerminalId, HostId, ConnectionPrompt),
     HostOsDetected(HostId, HostOs),
     Notice(RemoteTerminalId, TerminalNotice),
+    /// The shell reported another folder; the right sidebar's 文件 follows.
+    DirectoryChanged(RemoteTerminalId, ReportedDirectory),
 }
 
 /// A remote-host Dock panel backed by the shared terminal engine. The
@@ -76,7 +78,8 @@ impl TerminalPanel {
                 window,
                 cx,
             );
-            terminal.set_menu_items(connection_menu_items(id, host_id));
+            terminal.set_menu_items(remote_menu_items(id, host_id, store.clone()));
+            terminal.set_reconnect_action(ReconnectTerminal(id), cx);
             terminal
         });
         let subscriptions = vec![
@@ -103,6 +106,12 @@ impl TerminalPanel {
                     }
                     TerminalEvent::Notice(notice) => {
                         cx.emit(TerminalPanelEvent::Notice(this.id, notice.clone()));
+                    }
+                    TerminalEvent::DirectoryChanged(directory) => {
+                        cx.emit(TerminalPanelEvent::DirectoryChanged(
+                            this.id,
+                            directory.clone(),
+                        ));
                     }
                 },
             ),
@@ -246,7 +255,15 @@ impl Panel for TerminalPanel {
             .and_then(|host| host.os);
         let mark = HostMark::new(("terminal-tab-os", id.0), self.default_title(cx), os).small();
         let tab_menu = self.tab_menu(cx);
+        let state = match self.lifecycle(cx) {
+            TerminalLifecycle::Starting => ConnectionState::Connecting,
+            TerminalLifecycle::Running => ConnectionState::Connected,
+            TerminalLifecycle::Exited { .. }
+            | TerminalLifecycle::Failed(_)
+            | TerminalLifecycle::Closing => ConnectionState::Disconnected,
+        };
         ClosableTabTitle::new(("terminal-tab", id.0), mark, self.tab_title(cx))
+            .connection_state(state)
             .closable(("close-terminal", id.0), Box::new(CloseTerminal(id)))
             .context_menu(move |menu, _, cx| tab_menu.build(menu, cx))
     }
@@ -262,9 +279,10 @@ impl Panel for TerminalPanel {
         Some(LatencyLabel::new(("terminal-latency", self.id.0), latency))
     }
 
-    fn toolbar_buttons(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<Vec<Button>> {
+    fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
         let host_id = self.host_id;
         let terminal_id = self.id;
+        let reconnect_dispatch = self.focus_handle(cx);
         Some(vec![
             Button::new(("sftp", terminal_id.0))
                 .icon(Icon::new(CatalogIcon::FolderTree))
@@ -277,7 +295,7 @@ impl Panel for TerminalPanel {
                 .icon(Icon::new(CatalogIcon::RefreshCw))
                 .tooltip(t!("terminal.remote.reconnect"))
                 .on_click(move |_, window, cx| {
-                    window.dispatch_action(Box::new(ReconnectTerminal(terminal_id)), cx)
+                    reconnect_dispatch.dispatch_action(&ReconnectTerminal(terminal_id), window, cx)
                 }),
         ])
     }
@@ -296,9 +314,36 @@ impl Panel for TerminalPanel {
     }
 }
 
-/// The connection commands at the bottom of a remote terminal's context menu.
-fn connection_menu_items(id: RemoteTerminalId, host_id: HostId) -> TerminalMenuItems {
-    Rc::new(move |menu, lifecycle| {
+/// What a remote terminal adds to its context menu: copying the host's
+/// address and ID below 复制, and the connection's commands at the bottom.
+fn remote_menu_items(
+    id: RemoteTerminalId,
+    host_id: HostId,
+    store: Entity<HostStore>,
+) -> TerminalMenuItems {
+    let copy = Rc::new(move |menu: PopupMenu, cx: &App| {
+        // Named after what the address is, as in the tab's menu.
+        let copy_host = if store
+            .read(cx)
+            .host(host_id)
+            .is_some_and(|host| host.address_is_ip())
+        {
+            t!("terminal.remote.copy_ip")
+        } else {
+            t!("terminal.remote.copy_host_name")
+        };
+        menu.menu_with_icon(
+            copy_host,
+            Icon::new(CatalogIcon::ClipboardCopy),
+            Box::new(CopyHostAddress(host_id)),
+        )
+        .menu_with_icon(
+            t!("terminal.remote.copy_id"),
+            Icon::new(CatalogIcon::ClipboardCopy),
+            Box::new(CopyHostId(host_id)),
+        )
+    });
+    let commands = Rc::new(move |menu: PopupMenu, lifecycle: &TerminalLifecycle| {
         let connected = matches!(
             lifecycle,
             TerminalLifecycle::Starting | TerminalLifecycle::Running
@@ -319,7 +364,8 @@ fn connection_menu_items(id: RemoteTerminalId, host_id: HostId) -> TerminalMenuI
             Box::new(DisconnectTerminal(id)),
             !connected,
         )
-    })
+    });
+    TerminalMenuItems { copy, commands }
 }
 
 /// The commands of one remote terminal tab, as a snapshot taken while the tab

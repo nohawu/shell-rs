@@ -54,6 +54,8 @@ ShellRS 把 Xshell 式的主机管理和多标签终端、WinSCP 式的双栏 SF
 - Docker：按 compose 项目列出容器，启停、重启、看详情和日志，管理卷、镜像和网络。不是 root 时用免密码的 sudo（系统服务也是）。
 - Kubernetes：选择主机 kubeconfig 中的集群，读取所有命名空间并过滤 Pod、Deployment、StatefulSet、Service 等资源；查看详情与关联 Pod、检索容器日志、生成日志和进入容器等命令。详见[使用说明](docs/kubernetes.md)。
 - 历史命令读主机上的 `~/.bash_history`，命令片段所有主机共用、可以分类；点一下输入到终端，或直接执行。
+- 文件：终端旁的单栏远程文件列表，在终端自己的连接上开 SFTP 通道，跟随终端的当前目录。浏览、编辑和预览，拖入文件上传，下载到「下载」文件夹。
+- GPU/NPU：AI 主机的 NVIDIA GPU 和华为昇腾 NPU，按 8 卡设计：汇总、每卡的利用率、显存、温度、功耗和健康状态，以及计算进程（可以结束）。默认不显示，在设置里打开，其余工具也可以在那里隐藏。
 
 **SFTP**
 
@@ -123,7 +125,7 @@ ShellRS 把 Xshell 式的主机管理和多标签终端、WinSCP 式的双栏 SF
 | macOS 11+（Apple Silicon） | `ShellRS-<版本>-macos-aarch64.dmg` | 已签名并经过 Apple 公证。打开 DMG，把 ShellRS 拖进「应用程序」 |
 | macOS 11+（Intel） | `ShellRS-<版本>-macos-x86_64.dmg` | 已签名并经过 Apple 公证。打开 DMG，把 ShellRS 拖进「应用程序」 |
 | Windows x64 | `ShellRS-<版本>-windows-x86_64-setup.exe` | 按当前用户安装，不需要管理员权限。安装程序暂未签名，SmartScreen 拦下时点「更多信息 › 仍要运行」 |
-| Linux x64 | `ShellRS-<版本>-linux-x86_64.AppImage` | `chmod +x` 后直接运行，需要 glibc 2.35 以上（Ubuntu 22.04、Debian 12 及更新的版本） |
+| Linux x64 | `ShellRS-<版本>-linux-x86_64.AppImage` | `chmod +x` 后直接运行，需要 glibc 2.31 以上（Ubuntu 20.04、Debian 11 及更新的版本） |
 
 每个安装包都附带 minisign 签名（`.minisig`），另有一份 `SHA256SUMS`。
 
@@ -197,6 +199,7 @@ cargo test
 - [alacritty_terminal](https://crates.io/crates/alacritty_terminal) 和 [portable-pty](https://crates.io/crates/portable-pty)：终端模拟与本地 PTY
 - [keyring](https://crates.io/crates/keyring)：系统钥匙串
 - [Simple Icons](https://simpleicons.org)：系统徽章和右侧栏 Docker 工具使用的 logo（CC0）
+- [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)：SFTP 文件列表的彩色图标（MIT）
 - [WinSCP](https://winscp.net) 和 Xshell：交互设计的参照
 
 ## 许可证

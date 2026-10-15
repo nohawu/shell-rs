@@ -24,7 +24,7 @@ use unicode_width::UnicodeWidthChar as _;
 
 use crate::app::{
     CatalogIcon, ClearTerminal, CopyTerminal, DismissTerminalFind, FindInTerminal,
-    FindNextInTerminal, FindPreviousInTerminal, PasteTerminal,
+    FindNextInTerminal, FindPreviousInTerminal, PasteTerminal, SelectAllTerminal,
 };
 use crate::connection::{ConnectionPromptReply, Latency};
 use crate::i18n::{UiLocale, t};
@@ -50,6 +50,11 @@ const FIND_DEBOUNCE: Duration = Duration::from_millis(80);
 /// How long the pointer rests on a link before its address shows.
 const LINK_TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 
+/// How often a selection drag held past the top or the bottom scrolls on,
+/// and the most lines a step takes, however far out the pointer is.
+const EDGE_SCROLL_INTERVAL: Duration = Duration::from_millis(50);
+const EDGE_SCROLL_MOST: i32 = 10;
+
 /// The key held to open a link with a click, as the tooltip names it.
 #[cfg(target_os = "macos")]
 const OPEN_LINK_KEY: &str = "⌘";
@@ -66,13 +71,33 @@ fn opens_links(modifiers: &Modifiers) -> bool {
     }
 }
 
+fn reconnect_keystroke(event: &KeyDownEvent, lifecycle: &TerminalLifecycle) -> bool {
+    event.keystroke.key == "enter"
+        && event.keystroke.modifiers == Modifiers::default()
+        && !event.is_held
+        && !event.prefer_character_input
+        && matches!(
+            lifecycle,
+            TerminalLifecycle::Exited { .. } | TerminalLifecycle::Failed(_)
+        )
+}
+
 /// What a terminal is called for screen readers. Asked for each time it is
 /// drawn, so it follows the interface language.
 type TerminalLabel = Rc<dyn Fn(&App) -> SharedString>;
 
-/// The commands a terminal's owner adds to the bottom of its context menu,
-/// built from the terminal's lifecycle when the menu opens.
-pub type TerminalMenuItems = Rc<dyn Fn(PopupMenu, &TerminalLifecycle) -> PopupMenu>;
+/// What a terminal's owner adds to its context menu, built as the menu
+/// opens.
+#[derive(Clone)]
+pub struct TerminalMenuItems {
+    /// More to copy, below 复制.
+    pub copy: CopyItems,
+    /// The commands at the bottom, from the terminal's lifecycle.
+    pub commands: CommandItems,
+}
+
+pub type CopyItems = Rc<dyn Fn(PopupMenu, &App) -> PopupMenu>;
+pub type CommandItems = Rc<dyn Fn(PopupMenu, &TerminalLifecycle) -> PopupMenu>;
 
 /// The open find bar of one terminal.
 struct FindBar {
@@ -177,6 +202,24 @@ impl TerminalViewport {
         )
     }
 
+    /// How many lines a step scrolls with a selection drag at `position`:
+    /// none over the grid, up into the history (positive) above it, down
+    /// below it, the more the farther out, as every editor does.
+    fn edge_scroll(&self, position: gpui_kit::Point<Pixels>) -> i32 {
+        let top = self.geometry.bounds.top();
+        let bottom = top + self.geometry.line_height * self.rows as f32;
+        let line = self.geometry.line_height.as_f32().max(1.);
+        let lines =
+            |distance: Pixels| (1 + (distance.as_f32() / line) as i32).min(EDGE_SCROLL_MOST);
+        if position.y < top {
+            lines(top - position.y)
+        } else if position.y >= bottom {
+            -lines(position.y - bottom)
+        } else {
+            0
+        }
+    }
+
     fn grid_point(&self, position: gpui_kit::Point<Pixels>) -> (TerminalPoint, Side) {
         grid_point(
             position,
@@ -211,10 +254,17 @@ pub struct TerminalView {
     requested_size: TerminalSize,
     /// A selection drag is under way.
     selecting: bool,
+    /// A selection drag held past the top or the bottom: how many lines
+    /// each step scrolls, up when positive, and where across the edge row
+    /// the selection ends. The steps run while it is set.
+    edge_scroll: Option<(i32, Column, Side)>,
+    edge_scroll_task: Option<Task<()>>,
     scroll_accumulator: ScrollAccumulator,
     context_menu: Option<(Entity<PopupMenu>, gpui_kit::Point<Pixels>)>,
     context_menu_subscription: Option<Subscription>,
     menu_items: Option<TerminalMenuItems>,
+    reconnect_action: Option<Box<dyn Action>>,
+    reconnect_pending: bool,
     find: Option<FindBar>,
     cursor_visible: bool,
     focused: bool,
@@ -301,10 +351,14 @@ impl TerminalView {
             ime_cursor_bounds: None,
             requested_size: TerminalSize::DEFAULT,
             selecting: false,
+            edge_scroll: None,
+            edge_scroll_task: None,
             scroll_accumulator: ScrollAccumulator::default(),
             context_menu: None,
             context_menu_subscription: None,
             menu_items: None,
+            reconnect_action: None,
+            reconnect_pending: false,
             find: None,
             cursor_visible: true,
             focused: false,
@@ -324,6 +378,13 @@ impl TerminalView {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    /// Only remote panels opt in, with their own terminal-scoped action.
+    pub(super) fn set_reconnect_action(&mut self, action: impl Action, cx: &mut Context<Self>) {
+        self.reconnect_action = Some(Box::new(action));
+        self.engine
+            .update(cx, |engine, _| engine.enable_reconnect_on_enter());
     }
 
     pub fn restart(&mut self, cx: &mut Context<Self>) {
@@ -348,6 +409,7 @@ impl TerminalView {
     /// Forget everything in progress on the screen that is going away: IME
     /// composition, a selection drag, the context menu and the find bar.
     fn reset_interaction(&mut self) {
+        self.reconnect_pending = false;
         self.marked_text.clear();
         self.marked_selection = 0..0;
         self.ime_cursor_bounds = None;
@@ -395,6 +457,17 @@ impl TerminalView {
         self.engine.read(cx).generation()
     }
 
+    /// The folder the shell last reported on this connection, if it has.
+    pub fn directory(&self, cx: &App) -> Option<super::ReportedDirectory> {
+        self.engine.read(cx).directory().cloned()
+    }
+
+    /// Where channels beside the shell open: this terminal's connection,
+    /// whichever one it is on at the time.
+    pub fn channels(&self, cx: &App) -> super::TerminalChannels {
+        self.engine.read(cx).channels()
+    }
+
     /// Run `command` beside the shell, on this terminal's own connection;
     /// see [`super::ExecRequest`]. `None` while the shell is not running.
     pub fn exec(
@@ -422,6 +495,16 @@ impl TerminalView {
             .filter(|text| !text.is_empty())
         {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Select all the text, the scrollback with it. With 选中复制 on, it
+    /// goes to the clipboard, as what the mouse selects does.
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selecting = false;
+        self.engine.update(cx, |engine, cx| engine.select_all(cx));
+        if TerminalInteraction::current(cx).copy_on_select {
+            self.copy_selection(cx);
         }
     }
 
@@ -457,7 +540,7 @@ impl TerminalView {
         Ok(())
     }
 
-    /// Add the owner's commands below the terminal's own in the context menu.
+    /// Add the owner's items to the terminal's own in the context menu.
     pub fn set_menu_items(&mut self, items: TerminalMenuItems) {
         self.menu_items = Some(items);
     }
@@ -564,7 +647,19 @@ impl TerminalView {
             .update(cx, |engine, cx| engine.set_search_query(&query, cx));
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.is_focused(window)
+            && !self.reconnect_pending
+            && reconnect_keystroke(event, &self.lifecycle(cx))
+            && let Some(action) = &self.reconnect_action
+        {
+            // Dispatch is deferred. Latch immediately so queued key events cannot
+            // restart this connection twice before its lifecycle becomes Starting.
+            self.reconnect_pending = true;
+            window.dispatch_action(action.boxed_clone(), cx);
+            cx.stop_propagation();
+            return;
+        }
         let mode = self.engine.read(cx).mode();
         if let Some(bytes) = encode_key(&event.keystroke, mode) {
             self.send_user_input(bytes, cx);
@@ -581,11 +676,14 @@ impl TerminalView {
         self.engine.update(cx, |engine, cx| engine.resize(size, cx));
     }
 
+    /// The wheel. `cell` is the one under the pointer, nearest when it is
+    /// off the grid, and `side` which half of it.
     fn scroll(
         &mut self,
         delta: ScrollDelta,
         line_height: Pixels,
         cell: (usize, usize),
+        side: Side,
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
@@ -618,6 +716,12 @@ impl TerminalView {
             for _ in 0..lines.unsigned_abs().min(12) {
                 self.engine.read(cx).write(sequence.to_vec());
             }
+        } else if self.selecting {
+            // Dragging, the selection follows the pointer into the text
+            // that scrolls under it.
+            self.engine.update(cx, |engine, cx| {
+                engine.scroll_selection(lines, cell.1, Column(cell.0), side, cx)
+            });
         } else {
             self.engine
                 .update(cx, |engine, cx| engine.scroll(lines, cx));
@@ -642,10 +746,60 @@ impl TerminalView {
             .update(cx, |engine, cx| engine.update_selection(point, side, cx));
     }
 
+    /// The pointer moved while dragging a selection: it ends there, and
+    /// held past the top or the bottom (`lines` from `edge_scroll`), the
+    /// view scrolls on by steps, taking the selection with it, until the
+    /// pointer comes back or lets go.
+    fn drag_selection(
+        &mut self,
+        point: TerminalPoint,
+        side: Side,
+        lines: i32,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_selection(point, side, cx);
+        if lines == 0 {
+            self.stop_edge_scroll();
+            return;
+        }
+        self.edge_scroll = Some((lines, point.column, side));
+        if self.edge_scroll_task.is_some() {
+            return;
+        }
+        self.edge_scroll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(EDGE_SCROLL_INTERVAL).await;
+                let Ok(true) = this.update(cx, |this, cx| this.step_edge_scroll(cx)) else {
+                    break;
+                };
+            }
+        }));
+    }
+
+    /// One step of a drag held past the edge; whether to go on.
+    fn step_edge_scroll(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((lines, column, side)) = self.edge_scroll.filter(|_| self.selecting) else {
+            self.stop_edge_scroll();
+            return false;
+        };
+        // The row at the edge the pointer is past.
+        let row = if lines > 0 { 0 } else { usize::MAX };
+        self.engine.update(cx, |engine, cx| {
+            engine.scroll_selection(lines, row, column, side, cx)
+        });
+        true
+    }
+
+    fn stop_edge_scroll(&mut self) {
+        self.edge_scroll = None;
+        self.edge_scroll_task = None;
+    }
+
     /// The mouse let go of a selection. With 选中复制 on, what it took in
     /// goes to the clipboard; a click that selected nothing leaves it be.
     fn finish_selection(&mut self, cx: &mut Context<Self>) {
         self.selecting = false;
+        self.stop_edge_scroll();
         if TerminalInteraction::current(cx).copy_on_select {
             self.copy_selection(cx);
         }
@@ -776,7 +930,7 @@ impl TerminalView {
                 .is_some();
         let action_context = self.focus_handle.clone();
         let owner_items = self.menu_items.clone();
-        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+        let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
             let menu = menu
                 .action_context(action_context)
                 .menu_with_icon_and_disabled(
@@ -784,12 +938,22 @@ impl TerminalView {
                     Icon::new(IconName::Copy),
                     Box::new(CopyTerminal),
                     !has_selection,
-                )
+                );
+            let menu = match &owner_items {
+                Some(items) => (items.copy)(menu, cx),
+                None => menu,
+            };
+            let menu = menu
                 .menu_with_icon_and_disabled(
                     t!("terminal.menu.paste"),
                     Icon::new(CatalogIcon::ClipboardPaste),
                     Box::new(PasteTerminal),
                     !can_paste,
+                )
+                .menu_with_icon(
+                    t!("terminal.menu.select_all"),
+                    Icon::new(CatalogIcon::SquareDashedText),
+                    Box::new(SelectAllTerminal),
                 )
                 .separator()
                 .menu_with_icon(
@@ -804,7 +968,7 @@ impl TerminalView {
                     !can_clear,
                 );
             match &owner_items {
-                Some(items) => items(menu.separator(), &lifecycle),
+                Some(items) => (items.commands)(menu.separator(), &lifecycle),
                 None => menu,
             }
         });
@@ -1611,7 +1775,8 @@ impl Element for TerminalElement {
             }
             if event.dragging() {
                 let (point, side) = viewport.grid_point(event.position);
-                view.update(cx, |view, cx| view.update_selection(point, side, cx));
+                let lines = viewport.edge_scroll(event.position);
+                view.update(cx, |view, cx| view.drag_selection(point, side, lines, cx));
             } else {
                 // Let go where the window did not hear it.
                 view.update(cx, |view, cx| view.finish_selection(cx));
@@ -1637,11 +1802,13 @@ impl Element for TerminalElement {
                 return;
             }
             let cell = viewport.nearest_cell(event.position);
+            let (_, side) = viewport.grid_point(event.position);
             view.update(cx, |view, cx| {
                 view.scroll(
                     event.delta,
                     viewport.geometry.line_height,
                     cell,
+                    side,
                     event.modifiers,
                     cx,
                 )
@@ -2095,6 +2262,42 @@ mod tests {
 
     fn key(source: &str) -> Keystroke {
         Keystroke::parse(source).unwrap()
+    }
+
+    #[test]
+    fn reconnect_enter_requires_a_fresh_plain_key_and_stopped_lifecycle() {
+        let stopped = super::TerminalLifecycle::Exited {
+            code: 0,
+            signal: None,
+        };
+        let event = gpui_kit::KeyDownEvent {
+            keystroke: key("enter"),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert!(super::reconnect_keystroke(&event, &stopped));
+        assert!(super::reconnect_keystroke(
+            &event,
+            &super::TerminalLifecycle::Failed("offline".into())
+        ));
+        for state in [
+            super::TerminalLifecycle::Starting,
+            super::TerminalLifecycle::Running,
+            super::TerminalLifecycle::Closing,
+        ] {
+            assert!(!super::reconnect_keystroke(&event, &state));
+        }
+        for name in ["shift-enter", "ctrl-enter", "alt-enter", "cmd-enter", "a"] {
+            let mut modified = event.clone();
+            modified.keystroke = key(name);
+            assert!(!super::reconnect_keystroke(&modified, &stopped));
+        }
+        let mut held = event.clone();
+        held.is_held = true;
+        assert!(!super::reconnect_keystroke(&held, &stopped));
+        let mut character_input = event;
+        character_input.prefer_character_input = true;
+        assert!(!super::reconnect_keystroke(&character_input, &stopped));
     }
 
     #[test]

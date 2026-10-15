@@ -880,8 +880,7 @@ impl KubernetesDetails {
                 .and_then(|output| {
                     let value: Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
                     if resource.kind == ResourceKind::Secret {
-                        let metadata = value.as_array().and_then(|values| values.first()).ok_or_else(|| t!("k8s.incomplete").to_string())?;
-                        Ok(serde_json::json!({"kind":"Secret", "metadata":metadata}))
+                        model::secret_detail(&value)
                     } else if selected_container.as_ref().is_some_and(|name| !model::containers(&value).contains(name)) {
                         Err(t!("k8s.container_missing").to_string())
                     } else { Ok(value) }
